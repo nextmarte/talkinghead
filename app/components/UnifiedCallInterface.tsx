@@ -168,7 +168,7 @@ export default function UnifiedCallInterface() {
   const isSpeaking = activeHook.isSpeaking;
   const transcript = activeHook.transcript;
   const response = activeHook.response;
-  const latency = activeHook.latency;
+  const latency = activeHook.latency as UnifiedLatency | null;
   const error = activeHook.error;
 
   return (
