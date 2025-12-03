@@ -21,6 +21,7 @@ interface WebSocketMessage {
     | 'audio' 
     | 'audio_chunk' 
     | 'audio_complete' 
+    | 'text_complete'
     | 'reset_ack' 
     | 'interrupted'
     | 'error';
@@ -40,7 +41,13 @@ interface WebSocketMessage {
 const CHUNK_INTERVAL_MS = 100; // Envia chunk a cada 100ms
 const SAMPLE_RATE = 16000;
 
-export function useStreamingConversation() {
+interface UseStreamingOptions {
+  agentId?: string | null;
+}
+
+export function useStreamingConversation(options: UseStreamingOptions = {}) {
+  const { agentId } = options;
+  
   const [isConnected, setIsConnected] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -69,8 +76,13 @@ export function useStreamingConversation() {
 
     // Constrói URL do WebSocket dinamicamente (suporta HTTPS/proxy)
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host; // inclui porta se houver
-    const wsUrl = `${protocol}//${host}/ws/stream`;
+    const host = window.location.host;
+    let wsUrl = `${protocol}//${host}/ws/stream`;
+    
+    // Adiciona agent_id como query param se fornecido
+    if (agentId) {
+      wsUrl += `?agent_id=${encodeURIComponent(agentId)}`;
+    }
     
     console.log(`🔌 Conectando ao WebSocket: ${wsUrl}`);
     const ws = new WebSocket(wsUrl);
@@ -150,6 +162,16 @@ export function useStreamingConversation() {
           }
           break;
 
+        case 'text_complete':
+          // Resposta de texto puro (sem áudio)
+          setIsProcessing(false);
+          if (message.breakdown) {
+            setLatency(message.breakdown);
+            const b = message.breakdown;
+            console.log(`📝 Texto - LLM: ${b.llm_ms}ms, Total: ${b.total_ms}ms`);
+          }
+          break;
+
         case 'interrupted':
           // Limpa fila de áudio
           audioQueueRef.current = [];
@@ -172,7 +194,7 @@ export function useStreamingConversation() {
     };
 
     wsRef.current = ws;
-  }, []);
+  }, [agentId]);
 
   // Desconecta
   const disconnect = useCallback(() => {
@@ -381,6 +403,20 @@ export function useStreamingConversation() {
     audioQueueRef.current = [];
   }, []);
 
+  // Troca de agente em tempo real
+  const setAgent = useCallback((newAgentId: string | null) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ 
+        type: 'set_agent', 
+        agent_id: newAgentId 
+      }));
+      setTranscript('');
+      setResponse('');
+      setResponsePreview('');
+      setLatency(null);
+    }
+  }, []);
+
   // Toggle escuta
   const toggleListening = useCallback(() => {
     if (isListening) {
@@ -389,6 +425,28 @@ export function useStreamingConversation() {
       startListening();
     }
   }, [isListening, startListening, stopListening]);
+
+  // Enviar mensagem de texto (em vez de voz)
+  const sendTextMessage = useCallback((text: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      console.error('WebSocket não conectado');
+      return;
+    }
+
+    // Atualiza transcript local imediatamente
+    setTranscript(text);
+    setResponse('');
+    setResponsePreview('');
+    setIsProcessing(true);
+
+    // Envia mensagem de texto para o backend
+    wsRef.current.send(JSON.stringify({
+      type: 'text_message',
+      text: text,
+    }));
+
+    console.log('📝 Mensagem de texto enviada:', text);
+  }, []);
 
   // Cleanup
   useEffect(() => {
@@ -419,5 +477,7 @@ export function useStreamingConversation() {
     toggleListening,
     interrupt,
     resetConversation,
+    setAgent,
+    sendTextMessage,
   };
 }

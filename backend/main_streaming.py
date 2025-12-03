@@ -20,12 +20,15 @@ import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from services.tts_dual_gpu import DualGPUTTSService
 from services.stt_service import STTService
 from services.llm_service import LLMService
 from services.vad_service import VADService
+from services.agent_service import agent_service
+from routers.agents import router as agents_router
 
 load_dotenv()
 
@@ -84,6 +87,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Inclui rotas de agentes
+app.include_router(agents_router)
+
+# Serve arquivos estáticos (avatars, uploads, etc.)
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", os.path.join(os.path.dirname(__file__), "data", "uploads"))
+if os.path.exists(UPLOAD_DIR):
+    app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+    print(f"📁 Servindo arquivos estáticos de: {UPLOAD_DIR}")
+
 
 @app.get("/health")
 async def health_check():
@@ -102,8 +114,9 @@ async def health_check():
 class ConversationSession:
     """Gerencia uma sessão de conversa com streaming."""
     
-    def __init__(self, websocket: WebSocket):
+    def __init__(self, websocket: WebSocket, agent_id: Optional[str] = None):
         self.websocket = websocket
+        self.agent_id = agent_id
         self.conversation_history = []
         self.is_agent_speaking = False
         self.should_interrupt = False
@@ -126,11 +139,42 @@ class ConversationSession:
             await self.send({"type": "interrupted"})
             print("⚠️ Resposta interrompida pelo usuário")
     
-    def split_into_sentences(self, text: str) -> list[str]:
-        """Divide texto em sentenças para TTS incremental."""
-        # Divide por pontuação final
-        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-        return [s.strip() for s in sentences if s.strip()]
+    def split_into_sentences(self, text: str, max_chars: int = 80) -> list[str]:
+        """
+        Divide texto em sentenças para TTS incremental.
+        Prioriza pontuação, mas também divide em vírgulas ou por tamanho.
+        """
+        text = text.strip()
+        if not text:
+            return []
+        
+        # Primeiro tenta dividir por pontuação final (.!?)
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        
+        result = []
+        for sent in sentences:
+            sent = sent.strip()
+            if not sent:
+                continue
+            
+            # Se sentença muito longa, divide em vírgulas
+            if len(sent) > max_chars:
+                # Divide em vírgulas, dois-pontos, ponto-e-vírgula
+                sub_parts = re.split(r'(?<=[,;:])\s+', sent)
+                current = ""
+                for part in sub_parts:
+                    if len(current) + len(part) < max_chars:
+                        current = (current + " " + part).strip() if current else part
+                    else:
+                        if current:
+                            result.append(current)
+                        current = part
+                if current:
+                    result.append(current)
+            else:
+                result.append(sent)
+        
+        return result
     
     async def process_audio_streaming(self, audio_array: np.ndarray):
         """
@@ -190,6 +234,14 @@ class ConversationSession:
             self.is_agent_speaking = True
             self.should_interrupt = False
             
+            # Busca configurações de voz do agente
+            agent_config = await agent_service.get_agent(self.agent_id)
+            voice_config = {
+                "pitch": agent_config.voice_pitch,
+                "speed": agent_config.voice_speed,
+                "gender": agent_config.voice_gender,
+            }
+            
             # Fila de sentenças para TTS
             tts_queue: asyncio.Queue = asyncio.Queue()
             tts_results: list = []
@@ -209,10 +261,10 @@ class ConversationSession:
                         if self.should_interrupt:
                             break
                         
-                        # Sintetiza usando GPU apropriada
+                        # Sintetiza usando GPU apropriada com config de voz
                         gpu_id = sentence_index % 2
                         audio_array, audio_sr = await loop.run_in_executor(
-                            None, tts_service.synthesize, sentence, gpu_id
+                            None, tts_service.synthesize, sentence, gpu_id, self.agent_id, voice_config
                         )
                         
                         if self.should_interrupt:
@@ -252,7 +304,8 @@ class ConversationSession:
             
             # Processa stream do LLM
             async for token in llm_service.generate_response_streaming(
-                self.conversation_history
+                self.conversation_history,
+                agent_id=self.agent_id
             ):
                 if self.should_interrupt:
                     break
@@ -267,15 +320,27 @@ class ConversationSession:
                     "full_text": full_response
                 })
                 
-                # Verifica se temos sentença completa
-                sentences = self.split_into_sentences(text_buffer)
-                if len(sentences) > 1:
-                    # Sentença completa - envia para TTS
-                    complete_sentence = sentences[0]
-                    text_buffer = " ".join(sentences[1:])
+                # Verifica se temos chunk pronto para TTS
+                # Envia mais cedo: após pontuação ou vírgula ou 80+ chars
+                should_send = False
+                
+                # Pontuação final - sempre envia
+                if re.search(r'[.!?]\s*$', text_buffer):
+                    should_send = True
+                # Vírgula, dois-pontos, ponto-e-vírgula com 30+ chars
+                elif len(text_buffer) >= 30 and re.search(r'[,;:]\s*$', text_buffer):
+                    should_send = True
+                # Buffer muito grande (80+ chars) - força envio
+                elif len(text_buffer) >= 80:
+                    should_send = True
+                
+                if should_send:
+                    chunk_to_send = text_buffer.strip()
+                    text_buffer = ""
                     
-                    await tts_queue.put(complete_sentence)
-                    sentences_sent += 1
+                    if chunk_to_send:
+                        await tts_queue.put(chunk_to_send)
+                        sentences_sent += 1
             
             # Processa última sentença (pode não ter pontuação final)
             if text_buffer.strip() and not self.should_interrupt:
@@ -335,11 +400,84 @@ class ConversationSession:
             })
             self.is_agent_speaking = False
 
+    async def process_text_only(self, text: str):
+        """
+        Processa mensagem de texto e retorna resposta APENAS como texto.
+        Não gera áudio TTS - usado para chat de texto.
+        """
+        pipeline_start = time.time()
+        
+        try:
+            # Adiciona ao histórico
+            self.conversation_history.append({"role": "user", "content": text})
+            
+            # Busca configuração do agente
+            agent_config = await agent_service.get_agent(self.agent_id)
+            
+            # Gera resposta com LLM em streaming
+            llm_start = time.time()
+            full_response = ""
+            
+            async for token in llm_service.generate_response_streaming(
+                conversation_history=self.conversation_history,
+                agent_id=self.agent_id
+            ):
+                full_response += token
+                
+                # Envia preview do texto em streaming
+                await self.send({
+                    "type": "response_chunk",
+                    "text": token,
+                    "full_text": full_response
+                })
+            
+            llm_time = time.time() - llm_start
+            total_time = time.time() - pipeline_start
+            
+            # Salva resposta no histórico
+            if full_response:
+                self.conversation_history.append({
+                    "role": "assistant", 
+                    "content": full_response
+                })
+            
+            # Envia resposta final
+            await self.send({
+                "type": "response",
+                "text": full_response,
+                "latency_ms": int(llm_time * 1000)
+            })
+            
+            # Envia métricas (sem áudio)
+            await self.send({
+                "type": "text_complete",
+                "latency_ms": int(total_time * 1000),
+                "breakdown": {
+                    "llm_ms": int(llm_time * 1000),
+                    "total_ms": int(total_time * 1000),
+                    "text_only": True
+                }
+            })
+            
+            print(f"📝 Resposta de texto: LLM={llm_time*1000:.0f}ms")
+            
+        except Exception as e:
+            print(f"Erro ao processar texto: {e}")
+            import traceback
+            traceback.print_exc()
+            await self.send({
+                "type": "error",
+                "error": str(e)
+            })
+
 
 @app.websocket("/ws/stream")
-async def websocket_stream(websocket: WebSocket):
+async def websocket_stream(websocket: WebSocket, agent_id: Optional[str] = None):
     """
     WebSocket para streaming de áudio bidirecional.
+    
+    Query params:
+    - agent_id: ID do agente personalizado (opcional, None = assistente padrão)
     
     Protocolo:
     Cliente → Servidor:
@@ -347,6 +485,7 @@ async def websocket_stream(websocket: WebSocket):
     - {"type": "audio_end"} - Fim manual da fala
     - {"type": "interrupt"} - Interrompe resposta
     - {"type": "reset"} - Limpa histórico
+    - {"type": "set_agent", "agent_id": "..."} - Troca de agente
     
     Servidor → Cliente:
     - {"type": "listening"} - VAD detectou início de fala
@@ -359,10 +498,11 @@ async def websocket_stream(websocket: WebSocket):
     """
     await websocket.accept()
     
-    session = ConversationSession(websocket)
+    session = ConversationSession(websocket, agent_id=agent_id)
     vad = VADService(sample_rate=16000)
     
-    print("📞 Nova conexão de streaming")
+    agent_name = f"agente {agent_id}" if agent_id else "assistente padrão"
+    print(f"📞 Nova conexão de streaming ({agent_name})")
     
     try:
         while True:
@@ -416,6 +556,35 @@ async def websocket_stream(websocket: WebSocket):
                 session.conversation_history = []
                 vad.reset()
                 await session.send({"type": "reset_ack"})
+            
+            elif message["type"] == "set_agent":
+                # Troca de agente durante a sessão
+                new_agent_id = message.get("agent_id")
+                session.agent_id = new_agent_id
+                session.conversation_history = []  # Limpa histórico ao trocar
+                vad.reset()
+                agent_name = f"agente {new_agent_id}" if new_agent_id else "assistente padrão"
+                print(f"🔄 Agente alterado para: {agent_name}")
+                await session.send({
+                    "type": "agent_changed",
+                    "agent_id": new_agent_id
+                })
+            
+            elif message["type"] == "text_message":
+                # Mensagem de texto (em vez de voz) - responde SÓ com texto
+                text = message.get("text", "").strip()
+                if text:
+                    print(f"📝 Mensagem de texto recebida: {text}")
+                    
+                    # Envia confirmação do transcript
+                    await session.send({
+                        "type": "transcript",
+                        "text": text,
+                        "is_final": True
+                    })
+                    
+                    # Processa e responde APENAS com texto (sem TTS)
+                    await session.process_text_only(text)
                 
     except WebSocketDisconnect:
         print("📞 Conexão encerrada")
@@ -427,9 +596,9 @@ async def websocket_stream(websocket: WebSocket):
 
 # Mantém endpoint antigo para compatibilidade
 @app.websocket("/ws/conversation")
-async def websocket_conversation_legacy(websocket: WebSocket):
+async def websocket_conversation_legacy(websocket: WebSocket, agent_id: Optional[str] = None):
     """Endpoint legado - redireciona para novo streaming."""
-    await websocket_stream(websocket)
+    await websocket_stream(websocket, agent_id=agent_id)
 
 
 if __name__ == "__main__":

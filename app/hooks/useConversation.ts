@@ -24,7 +24,13 @@ interface WebSocketMessage {
 // Duração mínima de gravação em ms
 const MIN_RECORDING_DURATION = 500;
 
-export function useConversation() {
+interface UseConversationOptions {
+  agentId?: string | null;
+}
+
+export function useConversation(options: UseConversationOptions = {}) {
+  const { agentId } = options;
+  
   const [isConnected, setIsConnected] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -52,7 +58,12 @@ export function useConversation() {
     // Constrói URL do WebSocket dinamicamente (suporta HTTPS/proxy)
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host; // inclui porta se houver
-    const wsUrl = `${protocol}//${host}/ws/conversation`;
+    let wsUrl = `${protocol}//${host}/ws/conversation`;
+    
+    // Adiciona agent_id como query param se fornecido
+    if (agentId) {
+      wsUrl += `?agent_id=${encodeURIComponent(agentId)}`;
+    }
     
     console.log(`🔌 Conectando ao WebSocket (PTT): ${wsUrl}`);
     const ws = new WebSocket(wsUrl);
@@ -131,7 +142,7 @@ export function useConversation() {
     };
 
     wsRef.current = ws;
-  }, []);
+  }, [agentId]);
 
   // Desconecta
   const disconnect = useCallback(() => {
@@ -338,6 +349,40 @@ export function useConversation() {
     setError(null);
   }, []);
 
+  // Troca de agente
+  const setAgent = useCallback((newAgentId: string | null) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ 
+        type: 'set_agent', 
+        agent_id: newAgentId 
+      }));
+      setTranscript('');
+      setResponse('');
+      setLatency(null);
+    }
+  }, []);
+
+  // Enviar mensagem de texto (em vez de voz)
+  const sendTextMessage = useCallback((text: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      console.error('WebSocket não conectado');
+      return;
+    }
+
+    // Atualiza transcript local imediatamente
+    setTranscript(text);
+    setResponse('');
+    setIsProcessing(true);
+
+    // Envia mensagem de texto para o backend
+    wsRef.current.send(JSON.stringify({
+      type: 'text_message',
+      text: text,
+    }));
+
+    console.log('📝 Mensagem de texto enviada:', text);
+  }, []);
+
   // Cleanup
   useEffect(() => {
     return () => {
@@ -361,5 +406,7 @@ export function useConversation() {
     startRecording,
     stopRecording,
     resetConversation,
+    setAgent,
+    sendTextMessage,
   };
 }
