@@ -1,0 +1,423 @@
+'use client';
+
+import { useState, useRef, useCallback, useEffect } from 'react';
+
+interface LatencyBreakdown {
+  stt_ms: number;
+  llm_ms: number;
+  first_audio_ms?: number;
+  total_ms?: number;
+  sentences?: number;
+  streaming?: boolean;
+}
+
+interface WebSocketMessage {
+  type: 
+    | 'listening' 
+    | 'processing'
+    | 'transcript' 
+    | 'response' 
+    | 'response_chunk'
+    | 'audio' 
+    | 'audio_chunk' 
+    | 'audio_complete' 
+    | 'reset_ack' 
+    | 'interrupted'
+    | 'error';
+  text?: string;
+  full_text?: string;
+  data?: string;
+  sample_rate?: number;
+  latency_ms?: number;
+  breakdown?: LatencyBreakdown;
+  error?: string;
+  chunk_index?: number;
+  is_last?: boolean;
+  sentence?: string;
+}
+
+// Configurações de streaming
+const CHUNK_INTERVAL_MS = 100; // Envia chunk a cada 100ms
+const SAMPLE_RATE = 16000;
+
+export function useStreamingConversation() {
+  const [isConnected, setIsConnected] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isUserSpeaking, setIsUserSpeaking] = useState(false);
+  const [transcript, setTranscript] = useState('');
+  const [response, setResponse] = useState('');
+  const [responsePreview, setResponsePreview] = useState('');
+  const [latency, setLatency] = useState<LatencyBreakdown | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  
+  // Fila de áudio para reprodução suave
+  const audioQueueRef = useRef<{data: string, sampleRate: number}[]>([]);
+  const isPlayingQueueRef = useRef(false);
+  const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
+
+  // Conecta ao WebSocket (modo streaming)
+  const connect = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+
+    // Constrói URL do WebSocket dinamicamente (suporta HTTPS/proxy)
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host; // inclui porta se houver
+    const wsUrl = `${protocol}//${host}/ws/stream`;
+    
+    console.log(`🔌 Conectando ao WebSocket: ${wsUrl}`);
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      setIsConnected(true);
+      setError(null);
+      console.log('✅ Conectado ao servidor (streaming mode)');
+      
+      // Keep-alive ping a cada 30s para evitar desconexão por inatividade
+      const pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, 30000);
+      
+      ws.addEventListener('close', () => clearInterval(pingInterval));
+    };
+
+    ws.onclose = () => {
+      setIsConnected(false);
+      stopListening();
+      console.log('❌ Desconectado do servidor');
+    };
+
+    ws.onerror = (e) => {
+      setError('Erro de conexão com o servidor');
+      console.error('WebSocket error:', e);
+    };
+
+    ws.onmessage = async (event) => {
+      const message: WebSocketMessage = JSON.parse(event.data);
+
+      switch (message.type) {
+        case 'listening':
+          setIsUserSpeaking(true);
+          setTranscript('');
+          setResponsePreview('');
+          break;
+
+        case 'processing':
+          setIsUserSpeaking(false);
+          setIsProcessing(true);
+          break;
+
+        case 'transcript':
+          setTranscript(message.text || '');
+          break;
+
+        case 'response_chunk':
+          // Preview incremental do LLM
+          setResponsePreview(message.full_text || '');
+          break;
+
+        case 'response':
+          setResponse(message.text || '');
+          setResponsePreview('');
+          break;
+
+        case 'audio_chunk':
+          // Adiciona chunk à fila e inicia reprodução
+          if (message.data) {
+            audioQueueRef.current.push({
+              data: message.data,
+              sampleRate: message.sample_rate!,
+            });
+            processAudioQueue();
+          }
+          break;
+
+        case 'audio_complete':
+          setIsProcessing(false);
+          if (message.breakdown) {
+            setLatency(message.breakdown);
+            const b = message.breakdown;
+            console.log(`📊 Streaming - 1º áudio: ${b.first_audio_ms}ms, Total: ${b.total_ms}ms, Sentenças: ${b.sentences}`);
+          }
+          break;
+
+        case 'interrupted':
+          // Limpa fila de áudio
+          audioQueueRef.current = [];
+          stopCurrentAudio();
+          setIsSpeaking(false);
+          console.log('⚠️ Resposta interrompida');
+          break;
+
+        case 'error':
+          setIsProcessing(false);
+          setError(message.error || 'Erro desconhecido');
+          break;
+
+        case 'reset_ack':
+          setTranscript('');
+          setResponse('');
+          setResponsePreview('');
+          break;
+      }
+    };
+
+    wsRef.current = ws;
+  }, []);
+
+  // Desconecta
+  const disconnect = useCallback(() => {
+    stopListening();
+    wsRef.current?.close();
+    wsRef.current = null;
+    setIsConnected(false);
+  }, []);
+
+  // Para áudio atual
+  const stopCurrentAudio = useCallback(() => {
+    if (currentSourceRef.current) {
+      try {
+        currentSourceRef.current.stop();
+      } catch {}
+      currentSourceRef.current = null;
+    }
+  }, []);
+
+  // Toca áudio
+  const playAudio = async (base64Data: string, sampleRate: number): Promise<void> => {
+    try {
+      const binaryString = atob(base64Data);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      const int16Array = new Int16Array(bytes.buffer);
+      const float32Array = new Float32Array(int16Array.length);
+      for (let i = 0; i < int16Array.length; i++) {
+        float32Array[i] = int16Array[i] / 32768.0;
+      }
+
+      if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+        audioContextRef.current = new AudioContext({ sampleRate });
+      }
+      const ctx = audioContextRef.current;
+
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+
+      const audioBuffer = ctx.createBuffer(1, float32Array.length, sampleRate);
+      audioBuffer.getChannelData(0).set(float32Array);
+
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
+      currentSourceRef.current = source;
+      
+      return new Promise<void>((resolve) => {
+        source.onended = () => {
+          if (currentSourceRef.current === source) {
+            currentSourceRef.current = null;
+          }
+          resolve();
+        };
+        source.start();
+      });
+    } catch (err) {
+      console.error('Erro ao tocar áudio:', err);
+    }
+  };
+
+  // Processa fila de áudio
+  const processAudioQueue = useCallback(async () => {
+    if (isPlayingQueueRef.current || audioQueueRef.current.length === 0) {
+      return;
+    }
+    
+    isPlayingQueueRef.current = true;
+    setIsSpeaking(true);
+    
+    while (audioQueueRef.current.length > 0) {
+      const chunk = audioQueueRef.current.shift()!;
+      await playAudio(chunk.data, chunk.sampleRate);
+    }
+    
+    isPlayingQueueRef.current = false;
+    setIsSpeaking(false);
+  }, []);
+
+  // Inicia escuta contínua (modo streaming)
+  const startListening = useCallback(async () => {
+    if (!isConnected) {
+      setError('Não conectado ao servidor');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          channelCount: 1,
+          sampleRate: SAMPLE_RATE,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      });
+
+      streamRef.current = stream;
+
+      // Cria contexto de áudio para processamento
+      const audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+      audioContextRef.current = audioContext;
+
+      const source = audioContext.createMediaStreamSource(stream);
+      sourceRef.current = source;
+
+      // Processor para capturar chunks de áudio
+      // Nota: ScriptProcessorNode é deprecated mas ainda funciona
+      // TODO: Migrar para AudioWorklet no futuro
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      processorRef.current = processor;
+
+      processor.onaudioprocess = (e) => {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
+        const inputData = e.inputBuffer.getChannelData(0);
+        
+        // Converte para Int16
+        const int16Array = new Int16Array(inputData.length);
+        for (let i = 0; i < inputData.length; i++) {
+          int16Array[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+        }
+
+        // Converte para base64
+        const uint8Array = new Uint8Array(int16Array.buffer);
+        let base64 = '';
+        const chunkSize = 8192;
+        for (let i = 0; i < uint8Array.length; i += chunkSize) {
+          const chunk = uint8Array.subarray(i, i + chunkSize);
+          base64 += String.fromCharCode.apply(null, Array.from(chunk));
+        }
+        base64 = btoa(base64);
+
+        // Envia chunk para o servidor
+        wsRef.current.send(JSON.stringify({
+          type: 'audio_chunk',
+          data: base64,
+          sample_rate: SAMPLE_RATE
+        }));
+      };
+
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+
+      setIsListening(true);
+      setError(null);
+      console.log('🎤 Escuta contínua iniciada');
+      
+    } catch (err) {
+      setError('Erro ao acessar microfone');
+      console.error('Erro ao iniciar escuta:', err);
+    }
+  }, [isConnected]);
+
+  // Para escuta
+  const stopListening = useCallback(() => {
+    // Para o processador
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+
+    // Para a fonte
+    if (sourceRef.current) {
+      sourceRef.current.disconnect();
+      sourceRef.current = null;
+    }
+
+    // Para o stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+
+    // Envia sinal de fim manual (força processamento do buffer)
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'audio_end' }));
+    }
+
+    setIsListening(false);
+    setIsUserSpeaking(false);
+    console.log('🔇 Escuta parada');
+  }, []);
+
+  // Interrompe resposta do agente
+  const interrupt = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'interrupt' }));
+    }
+    audioQueueRef.current = [];
+    stopCurrentAudio();
+  }, [stopCurrentAudio]);
+
+  // Reset da conversa
+  const resetConversation = useCallback(() => {
+    wsRef.current?.send(JSON.stringify({ type: 'reset' }));
+    setTranscript('');
+    setResponse('');
+    setResponsePreview('');
+    setLatency(null);
+    setError(null);
+    audioQueueRef.current = [];
+  }, []);
+
+  // Toggle escuta
+  const toggleListening = useCallback(() => {
+    if (isListening) {
+      stopListening();
+    } else {
+      startListening();
+    }
+  }, [isListening, startListening, stopListening]);
+
+  // Cleanup
+  useEffect(() => {
+    return () => {
+      disconnect();
+      audioContextRef.current?.close();
+    };
+  }, [disconnect]);
+
+  return {
+    // Estado
+    isConnected,
+    isListening,
+    isProcessing,
+    isSpeaking,
+    isUserSpeaking,
+    transcript,
+    response,
+    responsePreview,
+    latency,
+    error,
+    
+    // Ações
+    connect,
+    disconnect,
+    startListening,
+    stopListening,
+    toggleListening,
+    interrupt,
+    resetConversation,
+  };
+}

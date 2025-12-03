@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: talkinghead-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - WHISPER_MODE=local
+      - WHISPER_MODEL=large-v3
+      - TTS_MODEL=tts_models/multilingual/multi-dataset/xtts_v2
+      - TTS_LANGUAGE=pt
+      - LLM_MODEL=gpt-4o-mini
+      - CUDA_VISIBLE_DEVICES=0,1
+    volumes:
+      - ./backend/models:/app/models
+      - huggingface_cache:/root/.cache/huggingface
+      - tts_cache:/root/.local/share/tts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: talkinghead-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000/ws/conversation
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  huggingface_cache:
+  tts_cache:
