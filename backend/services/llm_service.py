@@ -17,9 +17,9 @@ class LLMService:
     def __init__(self):
         self.client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", 150))
+        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", 300))  # Aumentado para respostas mais completas
         
-        print(f"🧠 LLM configurado: {self.model}")
+        print(f"🧠 LLM configurado: {self.model} (max_tokens={self.max_tokens})")
     
     async def generate_response(
         self, 
@@ -38,9 +38,12 @@ class LLMService:
         Returns:
             Texto da resposta
         """
+        print(f"🧠 LLM.generate_response: agent_id={agent_id}, history_len={len(conversation_history)}")
+        
         # Busca configuração do agente
         agent = await agent_service.get_agent(agent_id)
         system_prompt = agent.system_prompt
+        print(f"🧠 LLM: Agent loaded, prompt length={len(system_prompt)}")
         
         # Busca contexto RAG se agente personalizado
         rag_context = ""
@@ -51,19 +54,27 @@ class LLMService:
                     last_user_message = msg.get("content", "")
                     break
             
+            print(f"🧠 LLM: Last user message: '{last_user_message[:50] if last_user_message else 'None'}...'")
+            
             if last_user_message:
                 rag_context = await rag_service.get_context_for_query(
                     agent_id, 
                     last_user_message
                 )
+                print(f"🧠 LLM: RAG context length={len(rag_context)} chars")
         
         # Monta mensagens com contexto RAG
         messages = [{"role": "system", "content": system_prompt}]
         
         if rag_context:
             messages.append({"role": "system", "content": rag_context})
+            print(f"📚 LLM: RAG contexto injetado no prompt!")
+        else:
+            print(f"⚠️ LLM: Sem contexto RAG!")
         
         messages.extend(conversation_history[-10:])  # Últimas 10 mensagens
+        
+        print(f"🧠 LLM: Enviando {len(messages)} mensagens ao modelo {self.model}")
         
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -111,6 +122,12 @@ class LLMService:
                     agent_id, 
                     last_user_message
                 )
+        
+        # Log do RAG
+        if rag_context:
+            print(f"📚 LLM: RAG contexto injetado ({len(rag_context)} chars)")
+        elif agent_id:
+            print(f"⚠️ LLM: Sem contexto RAG para agent={agent_id}")
         
         # Monta mensagens com contexto RAG
         messages = [{"role": "system", "content": system_prompt}]

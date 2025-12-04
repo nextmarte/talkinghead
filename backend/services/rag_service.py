@@ -1,6 +1,7 @@
 """
 Serviço de RAG (Retrieval Augmented Generation) usando ChromaDB.
 Gerencia vetorização de documentos e busca semântica.
+Inclui Query Rewriting para melhorar resultados de busca.
 """
 import os
 import asyncio
@@ -8,6 +9,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 import hashlib
 
+from openai import AsyncOpenAI
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -28,6 +30,28 @@ UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/home/marcus/talkinghead/backend/data/uplo
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 
+# Prompt para Query Rewriting
+QUERY_REWRITE_PROMPT = """Você é um especialista em reformular perguntas para busca semântica.
+
+A base de conhecimento contém informações sobre UMA PESSOA específica (biografia, carreira, opiniões, declarações).
+
+Reformule a pergunta do usuário para encontrar informações PESSOAIS sobre essa pessoa.
+
+REGRAS:
+1. Adicione termos biográficos relevantes (biografia, perfil, trajetória, histórico pessoal)
+2. Expanda com sinônimos do tema principal
+3. Seja conciso (máximo 40 palavras)
+4. NÃO responda a pergunta
+
+Exemplos:
+- "qual sua formação?" → "formação acadêmica graduação mestrado doutorado universidade curso diploma biografia"
+- "onde você trabalha?" → "carreira profissional trabalho emprego cargo atuação trajetória"
+- "o que você acha de X?" → "opinião posicionamento declaração sobre X afirmou disse"
+
+Pergunta: {query}
+
+Query para busca:"""
+
 
 class RAGService:
     """Serviço de vetorização e busca semântica com ChromaDB."""
@@ -35,6 +59,7 @@ class RAGService:
     _instance = None
     _embeddings = None
     _collections: Dict[str, Chroma] = {}
+    _openai_client = None
     
     def __new__(cls):
         if cls._instance is None:
@@ -58,9 +83,37 @@ class RAGService:
         )
         
         self._initialized = True
-        print(f"📚 RAG Service inicializado (lazy embeddings)")
+        print(f"📚 RAG Service inicializado (lazy embeddings + query rewriting)")
         print(f"   ChromaDB: {CHROMA_PERSIST_DIR}")
         print(f"   Uploads: {UPLOAD_DIR}")
+    
+    def _get_openai_client(self):
+        """Lazy loading do cliente OpenAI."""
+        if self._openai_client is None:
+            self._openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        return self._openai_client
+    
+    async def _rewrite_query(self, query: str) -> str:
+        """
+        Reformula a query do usuário para melhorar a busca semântica.
+        Usa uma chamada rápida ao LLM para expandir e enriquecer a query.
+        """
+        try:
+            client = self._get_openai_client()
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",  # Modelo rápido e barato
+                messages=[
+                    {"role": "user", "content": QUERY_REWRITE_PROMPT.format(query=query)}
+                ],
+                max_tokens=150,
+                temperature=0.3  # Baixa para ser mais determinístico
+            )
+            rewritten = response.choices[0].message.content.strip()
+            print(f"🔄 Query rewrite: '{query[:40]}...' → '{rewritten[:60]}...'")
+            return rewritten
+        except Exception as e:
+            print(f"⚠️ Query rewrite falhou: {e}, usando query original")
+            return query
     
     def _get_embeddings(self):
         """Lazy loading dos embeddings."""
@@ -102,6 +155,44 @@ class RAGService:
         
         return loader_class(file_path)
     
+    def _detect_doc_type(self, file_path: str, content: str = "") -> tuple[str, int]:
+        """
+        Detecta o tipo de documento e retorna prioridade.
+        Documentos biográficos têm prioridade maior.
+        
+        Returns:
+            (doc_type, priority) - priority: 1=alta, 2=média, 3=baixa
+        """
+        filename = Path(file_path).name.lower()
+        content_lower = content[:2000].lower() if content else ""
+        
+        # Detecta por nome do arquivo
+        bio_keywords = ['dossie', 'dossiê', 'biografia', 'bio', 'perfil', 'curriculo', 'currículo', 'cv']
+        debate_keywords = ['debate', 'entrevista', 'transcrição', 'transcricao']
+        
+        for kw in bio_keywords:
+            if kw in filename:
+                return ("biography", 1)
+        
+        for kw in debate_keywords:
+            if kw in filename:
+                return ("debate", 3)
+        
+        # Detecta por conteúdo
+        bio_content_markers = ['formação acadêmica', 'graduado em', 'nascido em', 'biografia', 
+                               'trajetória', 'carreira acadêmica', 'mestrado', 'doutorado']
+        debate_content_markers = ['timecode', 'id_global', 'trecho', 'XXX_']
+        
+        bio_score = sum(1 for m in bio_content_markers if m in content_lower)
+        debate_score = sum(1 for m in debate_content_markers if m in content_lower)
+        
+        if bio_score >= 2:
+            return ("biography", 1)
+        elif debate_score >= 2:
+            return ("debate", 3)
+        
+        return ("general", 2)
+    
     async def embed_document(
         self, 
         agent_id: str, 
@@ -110,6 +201,7 @@ class RAGService:
     ) -> int:
         """
         Vetoriza um documento e adiciona à collection do agente.
+        Detecta automaticamente o tipo de documento para priorização.
         
         Args:
             agent_id: ID do agente dono do documento
@@ -125,10 +217,14 @@ class RAGService:
         loader = self._get_loader(file_path)
         documents = await asyncio.to_thread(loader.load)
         
+        # Detecta tipo do documento
+        full_content = " ".join([doc.page_content for doc in documents])
+        doc_type, priority = self._detect_doc_type(file_path, full_content)
+        
         # Split em chunks
         chunks = self._text_splitter.split_documents(documents)
         
-        # Adiciona metadados
+        # Adiciona metadados com tipo e prioridade
         file_id = hashlib.md5(file_path.encode()).hexdigest()[:8]
         for i, chunk in enumerate(chunks):
             chunk.metadata.update({
@@ -136,6 +232,8 @@ class RAGService:
                 "file_path": file_path,
                 "file_id": file_id,
                 "chunk_index": i,
+                "doc_type": doc_type,
+                "priority": priority,
                 **(metadata or {})
             })
         
@@ -155,6 +253,7 @@ class RAGService:
         
         print(f"✅ Documento vetorizado: {Path(file_path).name}")
         print(f"   Agent: {agent_id}")
+        print(f"   Tipo: {doc_type} (prioridade={priority})")
         print(f"   Chunks: {len(chunks)}")
         
         return len(chunks)
@@ -222,15 +321,20 @@ class RAGService:
         self, 
         agent_id: str, 
         query: str, 
-        k: int = 3
+        k: int = 5,
+        use_mmr: bool = True,
+        doc_type_filter: Optional[str] = None
     ) -> List[Dict]:
         """
         Busca documentos relevantes para a query.
+        Usa MMR (Maximal Marginal Relevance) para diversidade.
         
         Args:
             agent_id: ID do agente
             query: Texto da pergunta/busca
             k: Número de resultados
+            use_mmr: Se True, usa MMR para resultados mais diversos
+            doc_type_filter: Filtrar por tipo de documento ('biography', 'debate', etc)
             
         Returns:
             Lista de documentos relevantes com score
@@ -241,20 +345,43 @@ class RAGService:
             return []
         
         try:
-            results = await asyncio.to_thread(
-                vectorstore.similarity_search_with_score,
-                query,
-                k=k
-            )
+            # Configura filtro se especificado
+            filter_dict = {"doc_type": doc_type_filter} if doc_type_filter else None
             
-            return [
-                {
-                    "content": doc.page_content,
-                    "metadata": doc.metadata,
-                    "score": float(score)
-                }
-                for doc, score in results
-            ]
+            if use_mmr:
+                # MMR busca mais candidatos e seleciona os mais diversos
+                results = await asyncio.to_thread(
+                    vectorstore.max_marginal_relevance_search,
+                    query,
+                    k=k,
+                    fetch_k=k * 4,  # Busca 4x mais para ter diversidade
+                    lambda_mult=0.7,  # 0.7 = mais relevância, menos diversidade
+                    filter=filter_dict
+                )
+                # MMR não retorna score, então criamos um fake
+                return [
+                    {
+                        "content": doc.page_content,
+                        "metadata": doc.metadata,
+                        "score": 0.0  # MMR não retorna score
+                    }
+                    for doc in results
+                ]
+            else:
+                results = await asyncio.to_thread(
+                    vectorstore.similarity_search_with_score,
+                    query,
+                    k=k,
+                    filter=filter_dict
+                )
+                return [
+                    {
+                        "content": doc.page_content,
+                        "metadata": doc.metadata,
+                        "score": float(score)
+                    }
+                    for doc, score in results
+                ]
         except Exception as e:
             print(f"❌ Erro na busca: {e}")
             return []
@@ -267,6 +394,7 @@ class RAGService:
     ) -> str:
         """
         Retorna contexto formatado para injetar no prompt do LLM.
+        Usa Query Rewriting para melhorar a busca semântica.
         
         Args:
             agent_id: ID do agente
@@ -276,17 +404,75 @@ class RAGService:
         Returns:
             Contexto formatado para o prompt
         """
-        results = await self.search(agent_id, query, k=5)
+        print(f"🔍 RAG: Buscando contexto para agent={agent_id}, query='{query[:50]}...'")
+        
+        # Query Rewriting: reformula a pergunta para busca mais eficiente
+        rewritten_query = await self._rewrite_query(query)
+        
+        # Estratégia de busca híbrida:
+        # 1. Primeiro busca APENAS em documentos biográficos
+        # 2. Depois complementa com outros documentos se necessário
+        
+        all_results = []
+        
+        # Busca em biografias primeiro (filtro por doc_type)
+        try:
+            bio_results = await self.search(
+                agent_id, rewritten_query, k=5, 
+                use_mmr=False, doc_type_filter="biography"
+            )
+            all_results.extend(bio_results)
+            print(f"🔍 RAG: Encontrados {len(bio_results)} chunks biográficos")
+        except Exception as e:
+            print(f"⚠️ RAG: Erro na busca biográfica: {e}")
+        
+        # Se não encontrou biografias suficientes, busca geral
+        if len(all_results) < 3:
+            general_results = await self.search(agent_id, rewritten_query, k=8, use_mmr=True)
+            # Adiciona resultados que não estão duplicados
+            existing_contents = {r["content"][:100] for r in all_results}
+            for r in general_results:
+                if r["content"][:100] not in existing_contents:
+                    all_results.append(r)
+                    existing_contents.add(r["content"][:100])
+        
+        results = all_results
+        
+        # Se não encontrou com a reformulada, tenta com a original
+        if not results:
+            print(f"⚠️ RAG: Tentando busca com query original...")
+            results = await self.search(agent_id, query, k=8, use_mmr=True)
         
         if not results:
+            print(f"⚠️ RAG: Nenhum documento encontrado para agent={agent_id}")
             return ""
+        
+        # Remove duplicatas (mesmo conteúdo ou muito similar)
+        seen_hashes = set()
+        unique_results = []
+        for result in results:
+            # Hash dos primeiros 200 chars para detectar duplicatas
+            content_hash = hash(result["content"][:200])
+            if content_hash not in seen_hashes:
+                seen_hashes.add(content_hash)
+                unique_results.append(result)
+        
+        # Ordena por prioridade (1=biografia primeiro, 3=debate por último)
+        unique_results.sort(key=lambda x: x.get("metadata", {}).get("priority", 2))
+        
+        # Log dos tipos encontrados
+        types_found = {}
+        for r in unique_results:
+            t = r.get("metadata", {}).get("doc_type", "unknown")
+            types_found[t] = types_found.get(t, 0) + 1
+        print(f"🔍 RAG: {len(results)} resultados, {len(unique_results)} únicos. Tipos: {types_found}")
         
         # Monta contexto
         context_parts = []
         total_chars = 0
         max_chars = max_tokens * 4  # ~4 chars por token
         
-        for result in results:
+        for result in unique_results:
             content = result["content"].strip()
             if total_chars + len(content) > max_chars:
                 break
@@ -294,16 +480,25 @@ class RAGService:
             total_chars += len(content)
         
         if not context_parts:
+            print(f"⚠️ RAG: Contexto vazio após filtrar resultados")
             return ""
+        
+        print(f"✅ RAG: Encontrados {len(unique_results)} docs únicos, usando {len(context_parts)} chunks ({total_chars} chars)")
         
         context = "\n\n---\n\n".join(context_parts)
         
         return f"""
-INFORMAÇÕES DE CONTEXTO (base de conhecimento):
+=== INFORMAÇÕES DA SUA BASE DE CONHECIMENTO ===
+
 {context}
 
-Use as informações acima para responder à pergunta do usuário quando relevante.
-Se a informação não estiver no contexto, responda com base no seu conhecimento geral.
+=== INSTRUÇÕES IMPORTANTES ===
+
+1. PRIORIZE SEMPRE as informações acima ao responder.
+2. Se houver informações sobre o tema na base de conhecimento, USE-AS como fonte primária.
+3. Cite fatos, datas, nomes e detalhes específicos da base quando disponíveis.
+4. Se a base contiver opiniões ou declarações suas, reproduza-as fielmente.
+5. Apenas complemente com conhecimento geral se a base não tiver informação suficiente.
 """
     
     async def delete_collection(self, agent_id: str) -> bool:

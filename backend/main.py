@@ -11,11 +11,13 @@ import time
 import re
 from typing import Optional
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from services.tts_dual_gpu import DualGPUTTSService
@@ -75,6 +77,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Monta diretório de uploads para servir avatares e outros arquivos
+uploads_dir = Path(__file__).parent / "data" / "uploads"
+uploads_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
+print(f"📁 Servindo uploads de: {uploads_dir}")
+
 
 @app.get("/health")
 async def health_check():
@@ -99,6 +107,11 @@ async def websocket_conversation(websocket: WebSocket):
     - Servidor responde: {"type": "audio", "data": "<base64_audio>", "sample_rate": 22050}
     """
     await websocket.accept()
+    
+    # Extrai agent_id da query string
+    agent_id = websocket.query_params.get("agent_id")
+    if agent_id:
+        print(f"📞 Conexão com agente: {agent_id}")
     
     # Histórico de conversa para contexto
     conversation_history = []
@@ -167,12 +180,13 @@ async def websocket_conversation(websocket: WebSocket):
                         "latency_ms": int(stt_time * 1000)
                     })
                     
-                    # 3. Gera resposta do LLM
+                    # 3. Gera resposta do LLM (com agente personalizado)
                     llm_start = time.time()
                     conversation_history.append({"role": "user", "content": transcript})
                     
                     response_text = await llm_service.generate_response(
-                        conversation_history
+                        conversation_history,
+                        agent_id=agent_id
                     )
                     llm_time = time.time() - llm_start
                     
@@ -194,8 +208,8 @@ async def websocket_conversation(websocket: WebSocket):
                     if not sentences:
                         sentences = [response_text.strip()]
                     
-                    # Sintetiza todas as sentenças em paralelo (2 GPUs)
-                    audio_results = await tts_service.synthesize_parallel(sentences)
+                    # Sintetiza todas as sentenças em paralelo (2 GPUs) com voz do agente
+                    audio_results = await tts_service.synthesize_parallel(sentences, agent_id=agent_id)
                     first_chunk_time = time.time() - tts_start
                     
                     # Envia chunks na ordem correta

@@ -51,7 +51,21 @@ export default function AgentSelector({ onSelect, selectedAgentId }: AgentSelect
       const res = await fetch("/api/agents");
       if (res.ok) {
         const data = await res.json();
-        setAgents(data);
+        // Ordena: agente padrão primeiro, depois por nome
+        const sortedAgents = data.sort((a: Agent, b: Agent) => {
+          if (a.isDefault && !b.isDefault) return -1;
+          if (!a.isDefault && b.isDefault) return 1;
+          return a.name.localeCompare(b.name);
+        });
+        setAgents(sortedAgents);
+        
+        // Se não há agente selecionado, seleciona o padrão automaticamente
+        if (!selectedAgentId) {
+          const defaultAgent = sortedAgents.find((a: Agent) => a.isDefault);
+          if (defaultAgent) {
+            onSelect(defaultAgent.id, { name: defaultAgent.name, avatar: defaultAgent.avatar });
+          }
+        }
       }
     } catch (error) {
       console.error("Erro ao buscar agentes:", error);

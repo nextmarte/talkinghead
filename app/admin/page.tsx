@@ -17,7 +17,7 @@ export default async function AdminPage() {
       prisma.conversation.count(),
       prisma.message.count(),
       prisma.user.findMany({
-        take: 10,
+        take: 50,
         orderBy: { createdAt: "desc" },
         select: {
           id: true,
@@ -29,10 +29,11 @@ export default async function AdminPage() {
         },
       }),
       prisma.conversation.findMany({
-        take: 10,
+        take: 100,  // Aumentado para 100
         orderBy: { createdAt: "desc" },
         include: {
           user: { select: { name: true, email: true } },
+          agent: { select: { id: true, name: true } },
           _count: { select: { messages: true } },
         },
       }),

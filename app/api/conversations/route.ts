@@ -8,19 +8,31 @@ const createConversationSchema = z.object({
   title: z.string().optional(),
 });
 
-// GET /api/conversations - Lista conversas do usuário
-export async function GET() {
+// GET /api/conversations - Lista conversas (admin vê todas, usuário vê as suas)
+export async function GET(req: NextRequest) {
   try {
     const session = await auth();
     if (!session?.user?.id) {
       return NextResponse.json({ error: "Não autorizado" }, { status: 401 });
     }
 
+    const isAdmin = session.user.role === "ADMIN";
+    const { searchParams } = new URL(req.url);
+    const limit = parseInt(searchParams.get("limit") || "100");
+    const offset = parseInt(searchParams.get("offset") || "0");
+
     const conversations = await prisma.conversation.findMany({
-      where: { userId: session.user.id },
+      where: isAdmin ? {} : { userId: session.user.id },
       orderBy: { updatedAt: "desc" },
-      take: 50,
+      take: limit,
+      skip: offset,
       include: {
+        user: isAdmin ? {
+          select: { id: true, name: true, email: true }
+        } : false,
+        agent: {
+          select: { id: true, name: true, avatar: true }
+        },
         _count: { select: { messages: true } },
         messages: {
           take: 1,
@@ -29,6 +41,12 @@ export async function GET() {
         },
       },
     });
+
+    // Se admin, também retorna total para paginação
+    if (isAdmin) {
+      const total = await prisma.conversation.count();
+      return NextResponse.json({ conversations, total, limit, offset });
+    }
 
     return NextResponse.json(conversations);
   } catch (error) {

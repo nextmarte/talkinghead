@@ -20,6 +20,7 @@ interface Conversation {
   mode: string;
   createdAt: Date;
   user: { name: string | null; email: string };
+  agent?: { id: string; name: string } | null;
   _count: { messages: number };
 }
 
@@ -234,9 +235,9 @@ export default function AdminDashboard({
                   <thead>
                     <tr className="border-b border-slate-700">
                       <th className="text-left py-3 px-4 text-slate-400 font-medium">Usuário</th>
-                      <th className="text-left py-3 px-4 text-slate-400 font-medium">Título</th>
+                      <th className="text-left py-3 px-4 text-slate-400 font-medium">Agente</th>
                       <th className="text-left py-3 px-4 text-slate-400 font-medium">Modo</th>
-                      <th className="text-left py-3 px-4 text-slate-400 font-medium">Mensagens</th>
+                      <th className="text-left py-3 px-4 text-slate-400 font-medium">Msgs</th>
                       <th className="text-left py-3 px-4 text-slate-400 font-medium">Criada em</th>
                     </tr>
                   </thead>
@@ -248,7 +249,11 @@ export default function AdminDashboard({
                         onClick={() => setSelectedConversationId(conv.id)}
                       >
                         <td className="py-3 px-4 text-white">{conv.user.name || conv.user.email}</td>
-                        <td className="py-3 px-4 text-slate-300">{conv.title || "Sem título"}</td>
+                        <td className="py-3 px-4 text-slate-300">
+                          <span className="px-2 py-1 bg-purple-500/20 text-purple-400 rounded text-xs font-medium">
+                            {conv.agent?.name || "Padrão"}
+                          </span>
+                        </td>
                         <td className="py-3 px-4">
                           <span
                             className={`px-2 py-1 rounded text-xs font-medium ${

@@ -162,6 +162,12 @@ Diretrizes para respostas FALADAS:
 - Evite emojis e símbolos
 - Mantenha a personalidade definida acima em todas as respostas
 
+IMPORTANTE - BASE DE CONHECIMENTO:
+Você tem acesso a uma base de conhecimento personalizada com documentos, reportagens e informações específicas sobre você.
+Quando informações relevantes forem fornecidas da sua base de dados, PRIORIZE-AS sobre seu conhecimento geral.
+Se houver declarações, opiniões ou fatos documentados sobre você, reproduza-os FIELMENTE.
+Cite detalhes específicos (datas, nomes, números) quando disponíveis na base.
+
 Lembre-se: suas respostas serão convertidas em áudio e faladas. Escreva exatamente como você falaria naturalmente, mantendo sua personalidade."""
         
         return prompt
