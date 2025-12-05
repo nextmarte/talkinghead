@@ -14,7 +14,14 @@ services:
       - WHISPER_MODEL=large-v3
       - TTS_MODEL=tts_models/multilingual/multi-dataset/xtts_v2
       - TTS_LANGUAGE=pt
-      - LLM_MODEL=gpt-4o-mini
+      # LLM Provider: nebius ou openai
+      - LLM_PROVIDER=${LLM_PROVIDER:-nebius}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-1000}
+      # Nebius AI Studio
+      - NEBIUS_API_KEY=${NEBIUS_API_KEY}
+      - NEBIUS_API_BASE_URL=${NEBIUS_API_BASE_URL:-https://api.tokenfactory.nebius.com/v1/}
+      - NEBIUS_LLM_MODEL=${NEBIUS_LLM_MODEL:-gpt-oss-120b}
       - CUDA_VISIBLE_DEVICES=0,1
     volumes:
       - ./backend/models:/app/models

@@ -1,7 +1,8 @@
 """
-Serviço de LLM usando OpenAI GPT.
+Serviço de LLM com suporte multi-provider (Nebius e OpenAI).
 Gerencia contexto de conversação e personalidade do agente.
 Suporta agentes personalizados com RAG.
+Inclui fallback automático para OpenAI em caso de erro.
 """
 import os
 from typing import List, Dict, Optional
@@ -12,14 +13,39 @@ from .rag_service import rag_service
 
 
 class LLMService:
-    """Serviço de geração de respostas com GPT."""
+    """Serviço de geração de respostas com LLM (Nebius ou OpenAI)."""
     
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", 300))  # Aumentado para respostas mais completas
+        self.provider = os.getenv("LLM_PROVIDER", "openai").lower()
+        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", 300))
         
-        print(f"🧠 LLM configurado: {self.model} (max_tokens={self.max_tokens})")
+        # Cliente principal (Nebius ou OpenAI)
+        if self.provider == "nebius":
+            nebius_api_key = os.getenv("NEBIUS_API_KEY")
+            nebius_base_url = os.getenv("NEBIUS_API_BASE_URL", "https://api.tokenfactory.nebius.com/v1/")
+            
+            if not nebius_api_key:
+                print("⚠️ NEBIUS_API_KEY não configurada! Usando OpenAI como fallback.")
+                self.provider = "openai"
+                self.client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                self.model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+            else:
+                self.client = AsyncOpenAI(
+                    api_key=nebius_api_key,
+                    base_url=nebius_base_url
+                )
+                self.model = os.getenv("NEBIUS_LLM_MODEL", "gpt-oss-120b")
+                print(f"🧠 LLM configurado: Nebius - {self.model}")
+        else:
+            self.client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            self.model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+        
+        # Cliente fallback (sempre OpenAI)
+        self.fallback_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.fallback_model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+        
+        print(f"🧠 LLM principal: {self.provider.upper()} - {self.model} (max_tokens={self.max_tokens})")
+        print(f"🧠 LLM fallback: OpenAI - {self.fallback_model}")
     
     async def generate_response(
         self, 
@@ -74,18 +100,37 @@ class LLMService:
         
         messages.extend(conversation_history[-10:])  # Últimas 10 mensagens
         
-        print(f"🧠 LLM: Enviando {len(messages)} mensagens ao modelo {self.model}")
+        print(f"🧠 LLM: Enviando {len(messages)} mensagens ao modelo {self.model} ({self.provider})")
         
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=self.max_tokens,
-            temperature=temperature,
-            presence_penalty=0.1,
-            frequency_penalty=0.1
-        )
-        
-        return response.choices[0].message.content.strip()
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=self.max_tokens,
+                temperature=temperature,
+                presence_penalty=0.1,
+                frequency_penalty=0.1
+            )
+            
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            # Fallback para OpenAI em caso de erro
+            if self.provider != "openai":
+                print(f"⚠️ LLM: Erro no {self.provider}: {e}. Tentando fallback OpenAI...")
+                try:
+                    response = await self.fallback_client.chat.completions.create(
+                        model=self.fallback_model,
+                        messages=messages,
+                        max_tokens=self.max_tokens,
+                        temperature=temperature,
+                        presence_penalty=0.1,
+                        frequency_penalty=0.1
+                    )
+                    return response.choices[0].message.content.strip()
+                except Exception as fallback_error:
+                    print(f"❌ LLM: Fallback também falhou: {fallback_error}")
+                    raise fallback_error
+            raise e
     
     async def generate_response_streaming(
         self,
@@ -137,14 +182,38 @@ class LLMService:
         
         messages.extend(conversation_history[-10:])
         
-        stream = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=self.max_tokens,
-            temperature=temperature,
-            stream=True
-        )
+        print(f"🧠 LLM Streaming: Usando {self.provider} - {self.model}")
         
-        async for chunk in stream:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        try:
+            stream = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=self.max_tokens,
+                temperature=temperature,
+                stream=True
+            )
+            
+            async for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception as e:
+            # Fallback para OpenAI em caso de erro
+            if self.provider != "openai":
+                print(f"⚠️ LLM Streaming: Erro no {self.provider}: {e}. Tentando fallback OpenAI...")
+                try:
+                    stream = await self.fallback_client.chat.completions.create(
+                        model=self.fallback_model,
+                        messages=messages,
+                        max_tokens=self.max_tokens,
+                        temperature=temperature,
+                        stream=True
+                    )
+                    
+                    async for chunk in stream:
+                        if chunk.choices[0].delta.content:
+                            yield chunk.choices[0].delta.content
+                except Exception as fallback_error:
+                    print(f"❌ LLM Streaming: Fallback também falhou: {fallback_error}")
+                    raise fallback_error
+            else:
+                raise e
