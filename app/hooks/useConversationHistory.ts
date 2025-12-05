@@ -36,9 +36,12 @@ export function useConversationHistory() {
       const res = await fetch("/api/conversations");
       if (!res.ok) throw new Error("Erro ao carregar conversas");
       const data = await res.json();
-      setConversations(data);
+      // API retorna objeto para admin { conversations, total } ou array para usuário normal
+      const conversationsList = Array.isArray(data) ? data : (data.conversations || []);
+      setConversations(conversationsList);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro desconhecido");
+      setConversations([]); // Garante que sempre seja um array
     } finally {
       setIsLoading(false);
     }

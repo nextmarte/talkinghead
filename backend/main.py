@@ -270,6 +270,275 @@ async def websocket_conversation(websocket: WebSocket):
         await websocket.close(code=1011)
 
 
+# Importa serviços adicionais para streaming
+from services.vad_service import VADService
+from services.agent_service import agent_service
+
+
+class StreamingSession:
+    """Sessão de streaming em tempo real."""
+    
+    def __init__(self, websocket: WebSocket, agent_id: Optional[str] = None):
+        self.websocket = websocket
+        self.agent_id = agent_id
+        self.conversation_history = []
+        self.is_agent_speaking = False
+        self.should_interrupt = False
+        self.current_tts_task = None
+        
+    async def send(self, message: dict):
+        try:
+            await self.websocket.send_json(message)
+        except Exception as e:
+            print(f"Erro ao enviar: {e}")
+    
+    async def interrupt(self):
+        if self.is_agent_speaking and self.current_tts_task:
+            self.should_interrupt = True
+            self.current_tts_task.cancel()
+            await self.send({"type": "interrupted"})
+    
+    async def process_audio(self, audio_array: np.ndarray, sample_rate: int = 16000):
+        """Processa áudio com pipeline completo."""
+        pipeline_start = time.time()
+        
+        try:
+            # STT
+            stt_start = time.time()
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                temp_path = f.name
+                sf.write(temp_path, audio_array, sample_rate)
+            
+            loop = asyncio.get_event_loop()
+            transcript = await loop.run_in_executor(None, stt_service.transcribe, temp_path)
+            os.unlink(temp_path)
+            stt_time = time.time() - stt_start
+            
+            if not transcript.strip():
+                await self.send({"type": "error", "error": "Não consegui entender."})
+                return
+            
+            await self.send({"type": "transcript", "text": transcript, "latency_ms": int(stt_time * 1000)})
+            
+            # LLM + TTS streaming
+            llm_start = time.time()
+            self.conversation_history.append({"role": "user", "content": transcript})
+            self.is_agent_speaking = True
+            self.should_interrupt = False
+            
+            # Busca config do agente
+            agent_config = await agent_service.get_agent(self.agent_id)
+            voice_config = {
+                "pitch": agent_config.voice_pitch,
+                "speed": agent_config.voice_speed,
+                "gender": agent_config.voice_gender,
+            }
+            
+            full_response = ""
+            text_buffer = ""
+            sentences_sent = 0
+            first_audio_sent = False
+            first_audio_time = 0
+            
+            tts_queue = asyncio.Queue()
+            
+            async def tts_worker():
+                nonlocal first_audio_sent, first_audio_time
+                idx = 0
+                while True:
+                    try:
+                        sentence = await asyncio.wait_for(tts_queue.get(), timeout=10)
+                        if sentence is None or self.should_interrupt:
+                            break
+                        
+                        gpu_id = idx % 2
+                        audio, sr = await loop.run_in_executor(
+                            None, tts_service.synthesize, sentence, gpu_id, self.agent_id, voice_config
+                        )
+                        
+                        if len(audio) > 0 and not self.should_interrupt:
+                            if not first_audio_sent:
+                                first_audio_time = time.time() - pipeline_start
+                                first_audio_sent = True
+                            
+                            audio_int16 = (audio * 32767).astype(np.int16)
+                            audio_b64 = base64.b64encode(audio_int16.tobytes()).decode()
+                            
+                            await self.send({
+                                "type": "audio_chunk",
+                                "data": audio_b64,
+                                "sample_rate": sr,
+                                "chunk_index": idx,
+                                "sentence": sentence
+                            })
+                        
+                        idx += 1
+                        tts_queue.task_done()
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        break
+            
+            self.current_tts_task = asyncio.create_task(tts_worker())
+            
+            async for token in llm_service.generate_response_streaming(
+                self.conversation_history, agent_id=self.agent_id
+            ):
+                if self.should_interrupt:
+                    break
+                
+                text_buffer += token
+                full_response += token
+                
+                await self.send({"type": "response_chunk", "text": token, "full_text": full_response})
+                
+                # Enviar para TTS quando tiver pontuação ou buffer grande
+                if re.search(r'[.!?]\s*$', text_buffer) or (len(text_buffer) >= 30 and re.search(r'[,;:]\s*$', text_buffer)) or len(text_buffer) >= 80:
+                    chunk = text_buffer.strip()
+                    text_buffer = ""
+                    if chunk:
+                        await tts_queue.put(chunk)
+                        sentences_sent += 1
+            
+            if text_buffer.strip() and not self.should_interrupt:
+                await tts_queue.put(text_buffer.strip())
+                sentences_sent += 1
+            
+            await tts_queue.put(None)
+            
+            try:
+                await asyncio.wait_for(self.current_tts_task, timeout=30)
+            except:
+                pass
+            
+            llm_time = time.time() - llm_start
+            total_time = time.time() - pipeline_start
+            self.is_agent_speaking = False
+            
+            if full_response:
+                self.conversation_history.append({"role": "assistant", "content": full_response})
+            
+            await self.send({"type": "response", "text": full_response, "latency_ms": int(llm_time * 1000)})
+            await self.send({
+                "type": "audio_complete",
+                "latency_ms": int(total_time * 1000),
+                "breakdown": {
+                    "stt_ms": int(stt_time * 1000),
+                    "llm_ms": int(llm_time * 1000),
+                    "first_audio_ms": int(first_audio_time * 1000) if first_audio_sent else 0,
+                    "total_ms": int(total_time * 1000),
+                    "sentences": sentences_sent,
+                    "streaming": True
+                }
+            })
+            
+        except Exception as e:
+            print(f"Erro no pipeline: {e}")
+            import traceback
+            traceback.print_exc()
+            await self.send({"type": "error", "error": str(e)})
+            self.is_agent_speaking = False
+
+    async def process_text_only(self, text: str):
+        """Processa texto sem TTS."""
+        start = time.time()
+        
+        try:
+            self.conversation_history.append({"role": "user", "content": text})
+            full_response = ""
+            
+            async for token in llm_service.generate_response_streaming(
+                self.conversation_history, agent_id=self.agent_id
+            ):
+                full_response += token
+                await self.send({"type": "response_chunk", "text": token, "full_text": full_response})
+            
+            llm_time = time.time() - start
+            
+            if full_response:
+                self.conversation_history.append({"role": "assistant", "content": full_response})
+            
+            await self.send({"type": "response", "text": full_response, "latency_ms": int(llm_time * 1000)})
+            await self.send({
+                "type": "text_complete",
+                "latency_ms": int(llm_time * 1000),
+                "breakdown": {"llm_ms": int(llm_time * 1000), "text_only": True}
+            })
+            
+        except Exception as e:
+            await self.send({"type": "error", "error": str(e)})
+
+
+@app.websocket("/ws/stream")
+async def websocket_stream(websocket: WebSocket, agent_id: Optional[str] = None):
+    """WebSocket para streaming em tempo real (modo ligação)."""
+    await websocket.accept()
+    
+    session = StreamingSession(websocket, agent_id=agent_id)
+    vad = VADService(sample_rate=16000)
+    
+    print(f"📞 Nova conexão streaming (agente: {agent_id or 'padrão'})")
+    
+    try:
+        while True:
+            message = await websocket.receive_json()
+            
+            if message["type"] == "audio_chunk":
+                audio_bytes = base64.b64decode(message["data"])
+                audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                
+                speech_started, speech_ended, complete_audio = vad.process_audio(audio_array)
+                
+                if speech_started:
+                    await session.send({"type": "listening"})
+                    if session.is_agent_speaking:
+                        await session.interrupt()
+                
+                if speech_ended and complete_audio is not None:
+                    await session.send({"type": "processing"})
+                    await session.process_audio(complete_audio)
+            
+            elif message["type"] == "audio_end":
+                if vad.speech_buffer:
+                    complete_audio = np.concatenate(vad.speech_buffer)
+                    vad.reset()
+                    if len(complete_audio) > 1600:
+                        await session.send({"type": "processing"})
+                        await session.process_audio(complete_audio)
+            
+            elif message["type"] == "audio":
+                audio_bytes = base64.b64decode(message["data"])
+                audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                if len(audio_array) > 1600:
+                    await session.send({"type": "processing"})
+                    await session.process_audio(audio_array)
+            
+            elif message["type"] == "interrupt":
+                await session.interrupt()
+            
+            elif message["type"] == "reset":
+                session.conversation_history = []
+                vad.reset()
+                await session.send({"type": "reset_ack"})
+            
+            elif message["type"] == "set_agent":
+                session.agent_id = message.get("agent_id")
+                session.conversation_history = []
+                vad.reset()
+                await session.send({"type": "agent_changed", "agent_id": session.agent_id})
+            
+            elif message["type"] == "text_message":
+                text = message.get("text", "").strip()
+                if text:
+                    await session.send({"type": "transcript", "text": text, "is_final": True})
+                    await session.process_text_only(text)
+                    
+    except WebSocketDisconnect:
+        print("📞 Conexão streaming encerrada")
+    except Exception as e:
+        print(f"Erro no WebSocket stream: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
