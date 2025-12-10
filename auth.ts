@@ -7,7 +7,7 @@ import prisma from "@/lib/prisma";
 
 const loginSchema = z.object({
   email: z.string().email("Email inválido"),
-  password: z.string().min(6, "Senha deve ter pelo menos 6 caracteres"),
+  password: z.string().min(4, "Senha deve ter pelo menos 4 caracteres"),
 });
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
@@ -38,12 +38,21 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           where: { email },
         });
 
+        console.log('[AUTH DEBUG] User found:', user ? 'YES' : 'NO');
+        console.log('[AUTH DEBUG] Has password:', user?.password ? 'YES' : 'NO');
+        console.log('[AUTH DEBUG] DB hash:', user?.password);
+        console.log('[AUTH DEBUG] Input password:', password);
+
         if (!user || !user.password) {
+          console.log('[AUTH DEBUG] Returning null - no user or password');
           return null;
         }
 
         const isValidPassword = await bcrypt.compare(password, user.password);
+        console.log('[AUTH DEBUG] Password valid:', isValidPassword);
+        
         if (!isValidPassword) {
+          console.log('[AUTH DEBUG] Returning null - invalid password');
           return null;
         }
 

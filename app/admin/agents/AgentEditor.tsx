@@ -12,6 +12,8 @@ interface Agent {
   voiceGender: string | null;
   voicePitch: number | null;
   voiceSpeed: number | null;
+  useElevenLabs: boolean | null;
+  elevenLabsVoiceId: string | null;
   isActive: boolean;
   isDefault: boolean;
 }
@@ -35,6 +37,8 @@ export default function AgentEditor({ agent, onClose }: AgentEditorProps) {
   const [voiceGender, setVoiceGender] = useState(agent?.voiceGender || "neutral");
   const [voicePitch, setVoicePitch] = useState(agent?.voicePitch || 1.0);
   const [voiceSpeed, setVoiceSpeed] = useState(agent?.voiceSpeed || 1.0);
+  const [useElevenLabs, setUseElevenLabs] = useState(agent?.useElevenLabs || false);
+  const [elevenLabsVoiceId, setElevenLabsVoiceId] = useState(agent?.elevenLabsVoiceId || "");
   
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const voiceInputRef = useRef<HTMLInputElement>(null);
@@ -59,6 +63,8 @@ export default function AgentEditor({ agent, onClose }: AgentEditorProps) {
           voiceGender,
           voicePitch,
           voiceSpeed,
+          useElevenLabs,
+          elevenLabsVoiceId: useElevenLabs ? elevenLabsVoiceId : null,
         }),
       });
 
@@ -220,8 +226,7 @@ export default function AgentEditor({ agent, onClose }: AgentEditorProps) {
           )}
 
           {/* Configurações de Voz */}
-          {isEditing && (
-            <div className="p-4 bg-slate-700/50 rounded-xl space-y-4">
+          <div className="p-4 bg-slate-700/50 rounded-xl space-y-4">
               <h3 className="text-sm font-medium text-slate-300 flex items-center gap-2">
                 <svg className="w-4 h-4 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -296,8 +301,54 @@ export default function AgentEditor({ agent, onClose }: AgentEditorProps) {
                   <span>Rápido</span>
                 </div>
               </div>
+
+              {/* ElevenLabs TTS */}
+              <div className="pt-4 border-t border-slate-600">
+                <div className="flex items-start gap-3 mb-3">
+                  <input
+                    type="checkbox"
+                    id="useElevenLabs"
+                    checked={useElevenLabs}
+                    onChange={(e) => setUseElevenLabs(e.target.checked)}
+                    className="mt-1 w-4 h-4 rounded border-slate-600 bg-slate-700 text-purple-500 focus:ring-purple-500 focus:ring-offset-slate-800"
+                  />
+                  <div className="flex-1">
+                    <label htmlFor="useElevenLabs" className="block text-xs font-medium text-slate-300 cursor-pointer">
+                      Usar ElevenLabs TTS (Premium)
+                    </label>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Vozes de alta qualidade via API do ElevenLabs. Requer Voice ID configurado.
+                    </p>
+                  </div>
+                </div>
+
+                {useElevenLabs && (
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-2">
+                      Voice ID do ElevenLabs
+                    </label>
+                    <input
+                      type="text"
+                      value={elevenLabsVoiceId}
+                      onChange={(e) => setElevenLabsVoiceId(e.target.value)}
+                      placeholder="Ex: 21m00Tcm4TlvDq8ikWAM"
+                      className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+                    <p className="text-xs text-slate-500 mt-1">
+                      Obtenha seu Voice ID em{" "}
+                      <a
+                        href="https://elevenlabs.io/app/voice-library"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-purple-400 hover:text-purple-300 underline"
+                      >
+                        elevenlabs.io/app/voice-library
+                      </a>
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
-          )}
 
           {/* Name */}
           <div>

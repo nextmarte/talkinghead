@@ -74,10 +74,19 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    // Constrói URL do WebSocket dinamicamente (suporta HTTPS/proxy)
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    let wsUrl = `${protocol}//${host}/ws/stream`;
+    // Usa variável de ambiente ou constrói URL dinamicamente
+    let wsUrl: string;
+    const envWsUrl = process.env.NEXT_PUBLIC_WS_URL;
+    
+    if (envWsUrl) {
+      // Usa URL da variável de ambiente
+      wsUrl = `${envWsUrl}/ws/stream`;
+    } else {
+      // Fallback: constrói URL baseada no host atual
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.host;
+      wsUrl = `${protocol}//${host}/ws/stream`;
+    }
     
     // Adiciona agent_id como query param se fornecido
     if (agentId) {

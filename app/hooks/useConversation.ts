@@ -55,10 +55,19 @@ export function useConversation(options: UseConversationOptions = {}) {
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    // Constrói URL do WebSocket dinamicamente (suporta HTTPS/proxy)
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host; // inclui porta se houver
-    let wsUrl = `${protocol}//${host}/ws/conversation`;
+    // Usa variável de ambiente ou constrói URL dinamicamente
+    let wsUrl: string;
+    const envWsUrl = process.env.NEXT_PUBLIC_WS_URL;
+    
+    if (envWsUrl) {
+      // Usa URL da variável de ambiente
+      wsUrl = `${envWsUrl}/ws/conversation`;
+    } else {
+      // Fallback: constrói URL baseada no host atual
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.host;
+      wsUrl = `${protocol}//${host}/ws/conversation`;
+    }
     
     // Adiciona agent_id como query param se fornecido
     if (agentId) {

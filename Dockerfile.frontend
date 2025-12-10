@@ -1,12 +1,12 @@
 # Frontend Dockerfile - Next.js com Bun
-FROM oven/bun:1.1-alpine AS base
+FROM oven/bun:1.3-alpine AS base
 
 WORKDIR /app
 
 # Instala dependências
 FROM base AS deps
 COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile
+RUN bun install
 
 # Build da aplicação
 FROM base AS builder
@@ -19,6 +19,9 @@ RUN rm -rf backend
 
 # Define variável de ambiente para build
 ENV NEXT_TELEMETRY_DISABLED=1
+
+# Gera Prisma Client
+RUN bun prisma generate
 
 RUN bun run build
 

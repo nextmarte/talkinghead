@@ -261,10 +261,10 @@ class ConversationSession:
                         if self.should_interrupt:
                             break
                         
-                        # Sintetiza usando GPU apropriada com config de voz
+                        # Sintetiza usando GPU apropriada com config de voz (ou ElevenLabs)
                         gpu_id = sentence_index % 2
                         audio_array, audio_sr = await loop.run_in_executor(
-                            None, tts_service.synthesize, sentence, gpu_id, self.agent_id, voice_config
+                            None, tts_service.synthesize, sentence, gpu_id, self.agent_id, voice_config, agent_config
                         )
                         
                         if self.should_interrupt:

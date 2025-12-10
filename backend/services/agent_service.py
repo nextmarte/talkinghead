@@ -25,6 +25,8 @@ class AgentConfig:
     voice_gender: str = "neutral"  # "male", "female", "neutral"
     voice_pitch: float = 1.0       # 0.5-1.5
     voice_speed: float = 1.0       # 0.7-1.3
+    use_elevenlabs: bool = False   # Usar ElevenLabs TTS
+    elevenlabs_voice_id: Optional[str] = None  # Voice ID do ElevenLabs
     is_active: bool = True
     is_default: bool = False
 
@@ -135,6 +137,8 @@ class AgentService:
                 voice_gender=data.get("voiceGender", "neutral"),
                 voice_pitch=data.get("voicePitch", 1.0),
                 voice_speed=data.get("voiceSpeed", 1.0),
+                use_elevenlabs=data.get("useElevenLabs", False),
+                elevenlabs_voice_id=data.get("elevenLabsVoiceId"),
                 is_active=data.get("isActive", True),
                 is_default=data.get("isDefault", False)
             )

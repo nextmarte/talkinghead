@@ -34,6 +34,8 @@ interface Agent {
   voiceGender: string | null;
   voicePitch: number | null;
   voiceSpeed: number | null;
+  useElevenLabs: boolean;
+  elevenLabsVoiceId: string | null;
   isActive: boolean;
   isDefault: boolean;
   createdAt: Date;

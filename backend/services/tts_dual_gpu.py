@@ -576,16 +576,44 @@ class DualGPUTTSService:
             return audio
     
     def synthesize(self, text: str, gpu_id: int = 0, agent_id: Optional[str] = None, 
-                   voice_config: Optional[dict] = None) -> Tuple[np.ndarray, int]:
+                   voice_config: Optional[dict] = None, agent_config=None) -> Tuple[np.ndarray, int]:
         """
-        Sintetiza texto usando GPU especificada.
+        Sintetiza texto usando GPU especificada ou ElevenLabs API.
         
         Args:
             text: Texto para sintetizar
-            gpu_id: 0 ou 1 para selecionar GPU
+            gpu_id: 0 ou 1 para selecionar GPU (ignorado se usar ElevenLabs)
             agent_id: ID do agente para usar voz customizada
             voice_config: Dict com pitch, speed, gender
+            agent_config: Configuração completa do agente (para ElevenLabs)
         """
+        # Debug: mostra config do agente
+        if agent_config:
+            print(f"🔊 TTS Config - use_elevenlabs: {getattr(agent_config, 'use_elevenlabs', False)}, voice_id: {getattr(agent_config, 'elevenlabs_voice_id', None)}")
+        
+        # Verifica se deve usar ElevenLabs
+        if agent_config and hasattr(agent_config, 'use_elevenlabs') and agent_config.use_elevenlabs:
+            if agent_config.elevenlabs_voice_id:
+                try:
+                    print(f"🎤 Usando ElevenLabs TTS com voice_id: {agent_config.elevenlabs_voice_id}")
+                    from services.elevenlabs_service import get_elevenlabs_service
+                    elevenlabs = get_elevenlabs_service()
+                    
+                    # Limpa texto antes de enviar
+                    clean_text = self._clean_text_for_tts(text)
+                    # Remove underscore final que adicionamos para Coqui
+                    clean_text = clean_text.rstrip('_')
+                    
+                    audio, sr = elevenlabs.synthesize(clean_text, agent_config.elevenlabs_voice_id, agent_id)
+                    return audio, sr
+                    
+                except Exception as e:
+                    print(f"⚠️ Erro ao usar ElevenLabs, fallback para Coqui: {e}")
+                    # Continua com Coqui TTS abaixo
+            else:
+                print(f"⚠️ ElevenLabs ativado mas sem voice_id configurado, usando Coqui")
+        
+        # Coqui TTS local (padrão)
         speaker_wav = self._get_agent_voice(agent_id)
         
         if not self.use_dual_gpu:

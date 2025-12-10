@@ -63,12 +63,20 @@ export async function PUT(
 
     const { id } = await params;
     const body = await req.json();
-    const { name, description, systemPrompt, avatar, voiceSample, isActive, isDefault, voiceGender, voicePitch, voiceSpeed } = body;
+    const { name, description, systemPrompt, avatar, voiceSample, isActive, isDefault, voiceGender, voicePitch, voiceSpeed, useElevenLabs, elevenLabsVoiceId } = body;
 
     // Verifica se agente existe
     const existing = await prisma.agent.findUnique({ where: { id } });
     if (!existing) {
       return NextResponse.json({ error: "Agente não encontrado" }, { status: 404 });
+    }
+
+    // Valida Voice ID se ElevenLabs está habilitado
+    if (useElevenLabs && !elevenLabsVoiceId?.trim()) {
+      return NextResponse.json(
+        { error: "Voice ID é obrigatório quando ElevenLabs está habilitado" },
+        { status: 400 }
+      );
     }
 
     // Se marcando como default, desmarca outros
@@ -92,6 +100,10 @@ export async function PUT(
         ...(voiceGender !== undefined && { voiceGender }),
         ...(voicePitch !== undefined && { voicePitch }),
         ...(voiceSpeed !== undefined && { voiceSpeed }),
+        ...(useElevenLabs !== undefined && { useElevenLabs }),
+        ...(useElevenLabs !== undefined && {
+          elevenLabsVoiceId: useElevenLabs ? elevenLabsVoiceId?.trim() : null,
+        }),
       },
     });
 

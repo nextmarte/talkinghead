@@ -353,7 +353,7 @@ class StreamingSession:
                         
                         gpu_id = idx % 2
                         audio, sr = await loop.run_in_executor(
-                            None, tts_service.synthesize, sentence, gpu_id, self.agent_id, voice_config
+                            None, tts_service.synthesize, sentence, gpu_id, self.agent_id, voice_config, agent_config
                         )
                         
                         if len(audio) > 0 and not self.should_interrupt:

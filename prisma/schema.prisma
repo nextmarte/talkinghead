@@ -95,9 +95,13 @@ model Agent {
   voiceSample  String?            // URL do sample de áudio para clonagem
   
   // Configurações de voz
-  voiceGender  String   @default("neutral")  // "male", "female", "neutral"
-  voicePitch   Float    @default(1.0)        // 0.5-2.0 (grave-agudo)
-  voiceSpeed   Float    @default(1.0)        // 0.5-2.0 (lento-rápido)
+  voiceGender        String   @default("neutral")  // "male", "female", "neutral"
+  voicePitch         Float    @default(1.0)        // 0.5-2.0 (grave-agudo)
+  voiceSpeed         Float    @default(1.0)        // 0.5-2.0 (lento-rápido)
+  
+  // ElevenLabs TTS
+  useElevenLabs      Boolean  @default(false)      // Usar ElevenLabs em vez de Coqui TTS
+  elevenLabsVoiceId  String?                       // Voice ID do ElevenLabs
   
   isActive     Boolean  @default(true)
   isDefault    Boolean  @default(false) // Assistente padrão

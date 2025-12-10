@@ -52,11 +52,19 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { name, description, systemPrompt, avatar, voiceSample, isDefault, voiceGender, voicePitch, voiceSpeed } = body;
+    const { name, description, systemPrompt, avatar, voiceSample, isDefault, voiceGender, voicePitch, voiceSpeed, useElevenLabs, elevenLabsVoiceId } = body;
 
     if (!name || !systemPrompt) {
       return NextResponse.json(
         { error: "Nome e prompt são obrigatórios" },
+        { status: 400 }
+      );
+    }
+
+    // Valida Voice ID se ElevenLabs está habilitado
+    if (useElevenLabs && !elevenLabsVoiceId?.trim()) {
+      return NextResponse.json(
+        { error: "Voice ID é obrigatório quando ElevenLabs está habilitado" },
         { status: 400 }
       );
     }
@@ -80,6 +88,8 @@ export async function POST(req: NextRequest) {
         voicePitch: voicePitch || 1.0,
         voiceSpeed: voiceSpeed || 1.0,
         isDefault: isDefault || false,
+        useElevenLabs: useElevenLabs || false,
+        elevenLabsVoiceId: useElevenLabs ? elevenLabsVoiceId?.trim() : null,
         createdById: session.user.id!,
       },
     });
