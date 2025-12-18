@@ -133,12 +133,7 @@ class RAGService:
         ext = Path(file_path).suffix.lower()
         
         if ext == ".json":
-            # JSONLoader com jq_schema para extrair todo o conteúdo
-            return JSONLoader(
-                file_path=file_path,
-                jq_schema='.',
-                text_content=False,
-            )
+            return self._create_json_loader(file_path)
         
         loaders = {
             ".pdf": PyPDFLoader,
@@ -146,7 +141,6 @@ class RAGService:
             ".docx": Docx2txtLoader,
             ".doc": Docx2txtLoader,
             ".md": UnstructuredMarkdownLoader,
-            ".json": lambda fp: JSONLoader(file_path=fp, jq_schema='.', text_content=False),
         }
         
         loader_class = loaders.get(ext)
@@ -154,6 +148,153 @@ class RAGService:
             raise ValueError(f"Tipo de arquivo não suportado: {ext}")
         
         return loader_class(file_path)
+    
+    def _create_json_loader(self, file_path: str):
+        """
+        Cria um JSONLoader otimizado detectando a estrutura do JSON.
+        Detecta arrays e campos de texto para usar jq_schema apropriado.
+        
+        Estratégias:
+        1. Se JSON é um array: extrai cada item como documento
+        2. Se tem array com objetos: extrai array e busca campo texto
+        3. Se tem strings: extrai cada string
+        4. Fallback: retorna JSON todo como string
+        """
+        try:
+            import json as json_module
+            
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json_module.load(f)
+            
+            # Detecta melhor jq_schema baseado na estrutura
+            jq_schema, content_key = self._detect_json_schema_and_key(data)
+            
+            print(f"📄 JSON detectado: jq_schema='{jq_schema}', content_key={content_key}")
+            
+            # Se conseguiu detectar um content_key útil, usa-o
+            if content_key and jq_schema != '.':
+                print(f"   → Extraindo array com campo '{content_key}'")
+                return JSONLoader(
+                    file_path=file_path,
+                    jq_schema=jq_schema,
+                    content_key=content_key,
+                )
+            
+            # Se é um array simples, carrega elemento por elemento
+            if jq_schema == '.[]' and not content_key:
+                print(f"   → Extraindo cada elemento do array")
+                return JSONLoader(
+                    file_path=file_path,
+                    jq_schema='.',
+                    text_content=False,
+                )
+            
+            # Fallback: retorna todo JSON como string
+            print(f"   → Usando fallback: JSON todo como string")
+            return JSONLoader(
+                file_path=file_path,
+                jq_schema='.',
+                text_content=False,
+            )
+        except json_module.JSONDecodeError as e:
+            print(f"❌ Erro ao fazer parse do JSON: {e}")
+            raise ValueError(f"Arquivo JSON inválido: {e}")
+        except Exception as e:
+            print(f"⚠️ Erro ao detectar estrutura JSON: {e}, usando fallback")
+            # Fallback para erro de parsing
+            return JSONLoader(
+                file_path=file_path,
+                jq_schema='.',
+                text_content=False,
+            )
+    
+    def _detect_json_schema_and_key(self, data) -> tuple[str, Optional[str]]:
+        """
+        Detecta o melhor jq_schema e content_key para um JSON.
+        
+        Retorna:
+            (jq_schema, content_key): tuple onde
+            - jq_schema: padrão jq para extrair dados relevantes
+            - content_key: campo a usar como conteúdo de texto (None se não aplicável)
+        """
+        if not data:
+            return ('.', None)
+        
+        if isinstance(data, list):
+            # Array no topo: verifica o que contém
+            if len(data) == 0:
+                return ('.[]', None)
+            
+            first_item = data[0]
+            
+            if isinstance(first_item, dict):
+                # Array de objetos: procura campo de texto
+                content_key = self._find_text_field(first_item)
+                if content_key:
+                    print(f"   Array de {len(data)} objetos com campo '{content_key}'")
+                    return ('.[]', content_key)
+                else:
+                    print(f"   Array de {len(data)} objetos (sem campo texto específico)")
+                    return ('.[]', None)
+            elif isinstance(first_item, str):
+                # Array de strings
+                print(f"   Array de {len(data)} strings")
+                return ('.[]', None)
+            else:
+                # Array de primitivos
+                print(f"   Array de {len(data)} elementos primitivos")
+                return ('.[]', None)
+        
+        elif isinstance(data, dict):
+            # Objeto no topo: procura arrays úteis
+            print(f"   Objeto com {len(data)} chaves")
+            
+            # Procura arrays que pareçam conteúdo
+            for key, value in sorted(data.items()):
+                if isinstance(value, list) and len(value) > 0:
+                    first_item = value[0]
+                    
+                    if isinstance(first_item, dict):
+                        # Array de objetos
+                        content_key = self._find_text_field(first_item)
+                        if content_key:
+                            print(f"   → Usando array '{key}' ({len(value)} items, campo '{content_key}')")
+                            return (f'.{key}[]', content_key)
+                        else:
+                            print(f"   → Usando array '{key}' ({len(value)} items)")
+                            return (f'.{key}[]', None)
+                    elif isinstance(first_item, str):
+                        # Array de strings
+                        print(f"   → Usando array '{key}' ({len(value)} strings)")
+                        return (f'.{key}[]', None)
+            
+            # Se não encontrou array útil, retorna o objeto todo
+            print(f"   → Nenhum array principal encontrado, usando objeto inteiro")
+            return ('.', None)
+        
+        return ('.', None)
+    
+    def _find_text_field(self, obj: dict) -> Optional[str]:
+        """
+        Encontra o melhor campo de texto em um objeto.
+        Prioriza: text, content, description, caption, title, body, message
+        """
+        if not isinstance(obj, dict):
+            return None
+        
+        text_fields = [
+            'text', 'content', 'description', 'caption', 'title', 
+            'body', 'message', 'post', 'comment', 'bio', 'biografia'
+        ]
+        
+        for field in text_fields:
+            if field in obj:
+                value = obj[field]
+                # Verifica se é string
+                if isinstance(value, str):
+                    return field
+        
+        return None
     
     def _detect_doc_type(self, file_path: str, content: str = "") -> tuple[str, int]:
         """
@@ -211,18 +352,30 @@ class RAGService:
         Returns:
             Número de chunks criados
         """
+        file_name = Path(file_path).name
         collection_name = self._get_collection_name(agent_id)
         
+        print(f"\n{'='*70}")
+        print(f"🔄 Iniciando vetorização do documento: {file_name}")
+        print(f"   Agent ID: {agent_id}")
+        print(f"{'='*70}")
+        
         # Carrega documento
+        print(f"📖 Carregando arquivo...")
         loader = self._get_loader(file_path)
         documents = await asyncio.to_thread(loader.load)
+        print(f"✅ {len(documents)} documento(s) carregado(s)")
         
         # Detecta tipo do documento
+        print(f"🔍 Detectando tipo de documento...")
         full_content = " ".join([doc.page_content for doc in documents])
         doc_type, priority = self._detect_doc_type(file_path, full_content)
+        print(f"   Tipo: {doc_type} (prioridade={priority})")
         
         # Split em chunks
+        print(f"✂️  Dividindo em chunks (tamanho={CHUNK_SIZE}, overlap={CHUNK_OVERLAP})...")
         chunks = self._text_splitter.split_documents(documents)
+        print(f"✅ {len(chunks)} chunks criados")
         
         # Adiciona metadados com tipo e prioridade
         file_id = hashlib.md5(file_path.encode()).hexdigest()[:8]
@@ -238,23 +391,54 @@ class RAGService:
             })
         
         # Cria ou atualiza collection
+        print(f"🧠 Gerando embeddings e criando/atualizando collection...")
+        print(f"   📁 Persist dir: {CHROMA_PERSIST_DIR}/{collection_name}")
+        print(f"   📊 Chunks para vetorizar: {len(chunks)}")
+        
         persist_dir = os.path.join(CHROMA_PERSIST_DIR, collection_name)
         
-        vectorstore = await asyncio.to_thread(
-            Chroma.from_documents,
-            documents=chunks,
-            embedding=self._get_embeddings(),
-            collection_name=collection_name,
-            persist_directory=persist_dir
-        )
+        try:
+            import sys
+            import time
+            
+            # Função wrapper para debug
+            def create_chroma():
+                print(f"[CHROMA] Iniciando Chroma.from_documents...", file=sys.stderr, flush=True)
+                start = time.time()
+                result = Chroma.from_documents(
+                    documents=chunks,
+                    embedding=self._get_embeddings(),
+                    collection_name=collection_name,
+                    persist_directory=persist_dir
+                )
+                elapsed = time.time() - start
+                print(f"[CHROMA] Completado em {elapsed:.1f}s", file=sys.stderr, flush=True)
+                return result
+            
+            print(f"[DEBUG] Chamando asyncio.to_thread com timeout=300s")
+            vectorstore = await asyncio.wait_for(
+                asyncio.to_thread(create_chroma),
+                timeout=300.0
+            )
+            
+            # Cache da collection
+            self._collections[agent_id] = vectorstore
+            print(f"✅ Embeddings criados com sucesso!")
+        except asyncio.TimeoutError:
+            print(f"❌ TIMEOUT: Embeddings demoraram mais de 300 segundos")
+            raise
+        except Exception as e:
+            print(f"❌ ERRO ao criar embeddings: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
         
-        # Cache da collection
-        self._collections[agent_id] = vectorstore
-        
-        print(f"✅ Documento vetorizado: {Path(file_path).name}")
-        print(f"   Agent: {agent_id}")
-        print(f"   Tipo: {doc_type} (prioridade={priority})")
-        print(f"   Chunks: {len(chunks)}")
+        print(f"\n✅ SUCESSO: Documento vetorizado com sucesso!")
+        print(f"   📄 Arquivo: {file_name}")
+        print(f"   🏷️  Tipo: {doc_type} (prioridade={priority})")
+        print(f"   📊 Chunks: {len(chunks)}")
+        print(f"   🔑 File ID: {file_id}")
+        print(f"{'='*70}\n")
         
         return len(chunks)
     

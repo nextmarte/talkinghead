@@ -23,6 +23,8 @@ from dotenv import load_dotenv
 from services.tts_dual_gpu import DualGPUTTSService
 from services.stt_service import STTService
 from services.llm_service import LLMService
+from services.agent_service import agent_service
+from routers.agents import router as agents_router
 
 load_dotenv()
 
@@ -76,6 +78,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Registra routers
+app.include_router(agents_router)
 
 # Monta diretório de uploads para servir avatares e outros arquivos
 uploads_dir = Path(__file__).parent / "data" / "uploads"
@@ -208,8 +213,11 @@ async def websocket_conversation(websocket: WebSocket):
                     if not sentences:
                         sentences = [response_text.strip()]
                     
-                    # Sintetiza todas as sentenças em paralelo (2 GPUs) com voz do agente
-                    audio_results = await tts_service.synthesize_parallel(sentences, agent_id=agent_id)
+                    # Busca config do agente para ElevenLabs
+                    agent_config = await agent_service.get_agent(agent_id)
+                    
+                    # Sintetiza todas as sentenças em paralelo (2 GPUs ou ElevenLabs) com voz do agente
+                    audio_results = await tts_service.synthesize_parallel(sentences, agent_id=agent_id, agent_config=agent_config)
                     first_chunk_time = time.time() - tts_start
                     
                     # Envia chunks na ordem correta

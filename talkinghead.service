@@ -1,0 +1,22 @@
+[Unit]
+Description=TalkingHead Application Services
+After=network.target
+
+[Service]
+Type=forking
+User=marcus
+Group=marcus
+WorkingDirectory=/home/marcus/talkinghead
+ExecStart=/home/marcus/talkinghead/services.sh start
+ExecStop=/home/marcus/talkinghead/services.sh stop
+ExecReload=/home/marcus/talkinghead/services.sh restart
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Variáveis de ambiente se necessário
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=multi-user.target

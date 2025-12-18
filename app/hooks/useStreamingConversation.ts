@@ -154,6 +154,7 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
         case 'audio_chunk':
           // Adiciona chunk à fila e inicia reprodução
           if (message.data) {
+            console.log(`🎵 audio_chunk recebido (sr=${message.sample_rate}, idx=${message.chunk_index})`);
             audioQueueRef.current.push({
               data: message.data,
               sampleRate: message.sample_rate!,
@@ -226,6 +227,8 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
   // Toca áudio
   const playAudio = async (base64Data: string, sampleRate: number): Promise<void> => {
     try {
+      console.log(`🔊 playAudio: iniciando (sr=${sampleRate}, size=${base64Data.length})`);
+      
       const binaryString = atob(base64Data);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
@@ -239,14 +242,17 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
       }
 
       if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+        console.log(`🔊 Criando novo AudioContext (sr=${sampleRate})`);
         audioContextRef.current = new AudioContext({ sampleRate });
       }
       const ctx = audioContextRef.current;
 
       if (ctx.state === 'suspended') {
+        console.log(`🔊 AudioContext estava suspenso, resumindo...`);
         await ctx.resume();
       }
 
+      console.log(`🔊 Criando buffer de ${float32Array.length} samples`);
       const audioBuffer = ctx.createBuffer(1, float32Array.length, sampleRate);
       audioBuffer.getChannelData(0).set(float32Array);
 
@@ -257,32 +263,38 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
       
       return new Promise<void>((resolve) => {
         source.onended = () => {
+          console.log(`🔊 Áudio terminou`);
           if (currentSourceRef.current === source) {
             currentSourceRef.current = null;
           }
           resolve();
         };
+        console.log(`🔊 Iniciando reprodução...`);
         source.start();
       });
     } catch (err) {
-      console.error('Erro ao tocar áudio:', err);
+      console.error('❌ Erro ao tocar áudio:', err);
     }
   };
 
   // Processa fila de áudio
   const processAudioQueue = useCallback(async () => {
     if (isPlayingQueueRef.current || audioQueueRef.current.length === 0) {
+      console.log(`⏭️ processAudioQueue: skipped (playing=${isPlayingQueueRef.current}, queue_length=${audioQueueRef.current.length})`);
       return;
     }
     
+    console.log(`⏭️ processAudioQueue: iniciando (${audioQueueRef.current.length} chunks)`);
     isPlayingQueueRef.current = true;
     setIsSpeaking(true);
     
     while (audioQueueRef.current.length > 0) {
       const chunk = audioQueueRef.current.shift()!;
+      console.log(`⏭️ Tocando chunk (sr=${chunk.sampleRate})`);
       await playAudio(chunk.data, chunk.sampleRate);
     }
     
+    console.log(`⏭️ processAudioQueue: finalizado`);
     isPlayingQueueRef.current = false;
     setIsSpeaking(false);
   }, []);

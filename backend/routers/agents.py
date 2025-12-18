@@ -29,12 +29,12 @@ class KnowledgeStatusUpdate(BaseModel):
     error_message: Optional[str] = None
 
 
-async def update_knowledge_status(knowledge_id: str, status: str, chunk_count: Optional[int] = None, error: Optional[str] = None):
+async def update_knowledge_status(knowledge_id: str, agent_id: str, status: str, chunk_count: Optional[int] = None, error: Optional[str] = None):
     """Atualiza status do knowledge no banco via API Next.js."""
     try:
         async with httpx.AsyncClient() as client:
-            await client.patch(
-                f"{NEXTJS_API_URL}/api/knowledge/{knowledge_id}/status",
+            response = await client.patch(
+                f"{NEXTJS_API_URL}/api/agents/{agent_id}/knowledge/{knowledge_id}",
                 json={
                     "status": status,
                     "chunkCount": chunk_count,
@@ -42,6 +42,10 @@ async def update_knowledge_status(knowledge_id: str, status: str, chunk_count: O
                 },
                 timeout=10.0
             )
+            if response.status_code == 200:
+                print(f"✅ Status atualizado: {knowledge_id} → {status}")
+            else:
+                print(f"⚠️ Falha ao atualizar status: {response.status_code} - {response.text}")
     except Exception as e:
         print(f"⚠️ Erro ao atualizar status: {e}")
 
@@ -49,10 +53,21 @@ async def update_knowledge_status(knowledge_id: str, status: str, chunk_count: O
 async def process_document_task(knowledge_id: str, agent_id: str, file_path: str, file_name: str):
     """Task de vetorização em background."""
     try:
+        # Verifica se arquivo existe
+        if not os.path.exists(file_path):
+            error_msg = f"Arquivo não encontrado: {file_path}"
+            print(f"❌ {error_msg}")
+            await update_knowledge_status(knowledge_id, agent_id, "FAILED", error=error_msg)
+            return
+        
         # Atualiza status para PROCESSING
-        await update_knowledge_status(knowledge_id, "PROCESSING")
+        await update_knowledge_status(knowledge_id, agent_id, "PROCESSING")
         
         # Vetoriza documento
+        print(f"\n{'='*70}")
+        print(f"🚀 Processando documento: {file_name} (ID: {knowledge_id})")
+        print(f"{'='*70}")
+        
         chunk_count = await rag_service.embed_document(
             agent_id=agent_id,
             file_path=file_path,
@@ -60,16 +75,25 @@ async def process_document_task(knowledge_id: str, agent_id: str, file_path: str
         )
         
         # Atualiza status para COMPLETED
-        await update_knowledge_status(knowledge_id, "COMPLETED", chunk_count=chunk_count)
+        await update_knowledge_status(knowledge_id, agent_id, "COMPLETED", chunk_count=chunk_count)
         
         # Invalida cache do agente
         agent_service.invalidate_cache(agent_id)
         
-        print(f"✅ Documento vetorizado: {file_name} ({chunk_count} chunks)")
+        print(f"✅ Documento {file_name} processado com sucesso ({chunk_count} chunks)\n")
         
+    except ValueError as e:
+        # Erro de validação (JSON inválido, tipo não suportado, etc)
+        error_msg = f"Erro de validação: {str(e)}"
+        print(f"❌ {error_msg}")
+        await update_knowledge_status(knowledge_id, agent_id, "FAILED", error=error_msg)
     except Exception as e:
-        print(f"❌ Erro ao vetorizar documento: {e}")
-        await update_knowledge_status(knowledge_id, "FAILED", error=str(e))
+        # Erro genérico
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        print(f"❌ Erro ao vetorizar documento {file_name}: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        await update_knowledge_status(knowledge_id, agent_id, "FAILED", error=error_msg)
 
 
 @router.post("/knowledge/process")

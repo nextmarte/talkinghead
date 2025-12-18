@@ -89,6 +89,7 @@ export async function POST(
 
     // Dispara vetorização no backend (async)
     try {
+      console.log(`📤 Disparando vetorização: ${knowledge.id} → ${BACKEND_URL}/api/knowledge/process`);
       fetch(`${BACKEND_URL}/api/knowledge/process`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -98,14 +99,16 @@ export async function POST(
           file_path: filePath,
           file_name: file.name,
         }),
-      }).catch((err) => console.error("Erro ao disparar vetorização:", err));
+      }).catch((err) => console.error("❌ Erro ao disparar vetorização:", err));
     } catch (e) {
+      console.error("⚠️ Exceção ao disparar vetorização:", e);
       // Ignora erro - vetorização é assíncrona
     }
 
+    console.log(`✅ Upload concluído: ${file.name} (${knowledge.id})`);
     return NextResponse.json(knowledge, { status: 201 });
   } catch (error) {
-    console.error("Erro ao fazer upload:", error);
+    console.error("❌ Erro ao fazer upload:", error);
     return NextResponse.json({ error: "Erro interno" }, { status: 500 });
   }
 }

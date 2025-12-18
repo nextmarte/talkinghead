@@ -630,13 +630,14 @@ class DualGPUTTSService:
         
         return audio, sr
     
-    async def synthesize_parallel(self, sentences: List[str], agent_id: Optional[str] = None) -> List[Tuple[np.ndarray, int]]:
+    async def synthesize_parallel(self, sentences: List[str], agent_id: Optional[str] = None, agent_config = None) -> List[Tuple[np.ndarray, int]]:
         """
-        Sintetiza múltiplas sentenças em paralelo usando ambas as GPUs.
+        Sintetiza múltiplas sentenças em paralelo usando ambas as GPUs ou ElevenLabs.
         
         Args:
             sentences: Lista de sentenças para sintetizar
             agent_id: ID do agente para usar voz customizada
+            agent_config: Configuração completa do agente (para ElevenLabs)
             
         Returns:
             Lista de (audio_array, sample_rate) na ordem original
@@ -644,6 +645,32 @@ class DualGPUTTSService:
         if not sentences:
             return []
         
+        # Verifica se deve usar ElevenLabs
+        if agent_config and hasattr(agent_config, 'use_elevenlabs') and agent_config.use_elevenlabs:
+            if agent_config.elevenlabs_voice_id:
+                try:
+                    print(f"🎤 Usando ElevenLabs TTS (parallel) com voice_id: {agent_config.elevenlabs_voice_id}")
+                    from services.elevenlabs_service import get_elevenlabs_service
+                    elevenlabs = get_elevenlabs_service()
+                    
+                    results = []
+                    for sentence in sentences:
+                        clean_text = self._clean_text_for_tts(sentence)
+                        clean_text = clean_text.rstrip('_')
+                        if clean_text.strip():
+                            audio, sr = elevenlabs.synthesize(clean_text, agent_config.elevenlabs_voice_id, agent_id)
+                            results.append((audio, sr))
+                        else:
+                            results.append((np.array([], dtype=np.float32), self.sample_rate))
+                    return results
+                    
+                except Exception as e:
+                    print(f"⚠️ Erro ao usar ElevenLabs, fallback para Coqui: {e}")
+                    # Continua com Coqui TTS abaixo
+            else:
+                print(f"⚠️ ElevenLabs ativado mas sem voice_id configurado, usando Coqui")
+        
+        # Coqui TTS local (padrão)
         speaker_wav = self._get_agent_voice(agent_id)
         
         if not self.use_dual_gpu or len(sentences) == 1:
