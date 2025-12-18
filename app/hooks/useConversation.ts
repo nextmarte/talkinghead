@@ -138,6 +138,15 @@ export function useConversation(options: UseConversationOptions = {}) {
           }
           break;
 
+        case 'text_complete':
+          // Resposta de texto puro (sem áudio)
+          setIsProcessing(false);
+          if (message.breakdown) {
+            setLatency(message.breakdown);
+            console.log(`📝 Texto - LLM: ${message.breakdown.llm_ms}ms`);
+          }
+          break;
+
         case 'error':
           setIsProcessing(false);
           setError(message.error || 'Erro desconhecido');

@@ -298,16 +298,17 @@ class RAGService:
     
     def _detect_doc_type(self, file_path: str, content: str = "") -> tuple[str, int]:
         """
-        Detecta o tipo de documento e retorna prioridade.
-        Documentos biográficos têm prioridade maior.
+        Detecta o tipo de documento para referência/logging apenas.
+        TODOS os documentos têm PRIORIDADE IGUAL (priority=1).
+        A relevância semântica é determinada pela query, não pela classificação.
         
         Returns:
-            (doc_type, priority) - priority: 1=alta, 2=média, 3=baixa
+            (doc_type, priority) - priority: sempre 1 (igual para todos)
         """
         filename = Path(file_path).name.lower()
         content_lower = content[:2000].lower() if content else ""
         
-        # Detecta por nome do arquivo
+        # Classifica apenas para logging/análise - não afeta prioridade
         bio_keywords = ['dossie', 'dossiê', 'biografia', 'bio', 'perfil', 'curriculo', 'currículo', 'cv']
         debate_keywords = ['debate', 'entrevista', 'transcrição', 'transcricao']
         
@@ -317,9 +318,9 @@ class RAGService:
         
         for kw in debate_keywords:
             if kw in filename:
-                return ("debate", 3)
+                return ("debate", 1)
         
-        # Detecta por conteúdo
+        # Detecta por conteúdo para classificação
         bio_content_markers = ['formação acadêmica', 'graduado em', 'nascido em', 'biografia', 
                                'trajetória', 'carreira acadêmica', 'mestrado', 'doutorado']
         debate_content_markers = ['timecode', 'id_global', 'trecho', 'XXX_']
@@ -330,9 +331,9 @@ class RAGService:
         if bio_score >= 2:
             return ("biography", 1)
         elif debate_score >= 2:
-            return ("debate", 3)
+            return ("debate", 1)
         
-        return ("general", 2)
+        return ("general", 1)
     
     async def embed_document(
         self, 
@@ -578,7 +579,8 @@ class RAGService:
     ) -> str:
         """
         Retorna contexto formatado para injetar no prompt do LLM.
-        Usa Query Rewriting para melhorar a busca semântica.
+        Usa Query Rewriting + MMR para melhorar a busca semântica.
+        TODOS os documentos têm peso igual - relevância determinada pela query.
         
         Args:
             agent_id: ID do agente
@@ -593,39 +595,16 @@ class RAGService:
         # Query Rewriting: reformula a pergunta para busca mais eficiente
         rewritten_query = await self._rewrite_query(query)
         
-        # Estratégia de busca híbrida:
-        # 1. Primeiro busca APENAS em documentos biográficos
-        # 2. Depois complementa com outros documentos se necessário
+        # Busca única e unificada: todos os documentos com peso igual
+        # MMR garante diversidade nos resultados
+        results = await self.search(agent_id, rewritten_query, k=10, use_mmr=True, doc_type_filter=None)
         
-        all_results = []
-        
-        # Busca em biografias primeiro (filtro por doc_type)
-        try:
-            bio_results = await self.search(
-                agent_id, rewritten_query, k=5, 
-                use_mmr=False, doc_type_filter="biography"
-            )
-            all_results.extend(bio_results)
-            print(f"🔍 RAG: Encontrados {len(bio_results)} chunks biográficos")
-        except Exception as e:
-            print(f"⚠️ RAG: Erro na busca biográfica: {e}")
-        
-        # Se não encontrou biografias suficientes, busca geral
-        if len(all_results) < 3:
-            general_results = await self.search(agent_id, rewritten_query, k=8, use_mmr=True)
-            # Adiciona resultados que não estão duplicados
-            existing_contents = {r["content"][:100] for r in all_results}
-            for r in general_results:
-                if r["content"][:100] not in existing_contents:
-                    all_results.append(r)
-                    existing_contents.add(r["content"][:100])
-        
-        results = all_results
+        print(f"🔍 RAG: Encontrados {len(results)} chunks")
         
         # Se não encontrou com a reformulada, tenta com a original
         if not results:
             print(f"⚠️ RAG: Tentando busca com query original...")
-            results = await self.search(agent_id, query, k=8, use_mmr=True)
+            results = await self.search(agent_id, query, k=10, use_mmr=True, doc_type_filter=None)
         
         if not results:
             print(f"⚠️ RAG: Nenhum documento encontrado para agent={agent_id}")
@@ -641,8 +620,8 @@ class RAGService:
                 seen_hashes.add(content_hash)
                 unique_results.append(result)
         
-        # Ordena por prioridade (1=biografia primeiro, 3=debate por último)
-        unique_results.sort(key=lambda x: x.get("metadata", {}).get("priority", 2))
+        # Mantém ordem da busca semântica (MMR já ordena por relevância + diversidade)
+        # Sem reordenação por prioridade
         
         # Log dos tipos encontrados
         types_found = {}

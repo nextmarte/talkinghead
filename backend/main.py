@@ -266,6 +266,70 @@ async def websocket_conversation(websocket: WebSocket):
                         "error": f"Erro ao processar: {str(e)}"
                     })
                 
+            elif message["type"] == "text_message":
+                # Processa mensagem de texto (sem áudio)
+                start_time = time.time()
+                text = message.get("text", "").strip()
+                
+                if not text:
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": "Mensagem vazia"
+                    })
+                    continue
+                
+                print(f"📝 Mensagem de texto recebida: {text}")
+                
+                try:
+                    # Envia transcrição para o cliente
+                    await websocket.send_json({
+                        "type": "transcript",
+                        "text": text,
+                        "is_final": True
+                    })
+                    
+                    # Gera resposta do LLM
+                    llm_start = time.time()
+                    conversation_history.append({"role": "user", "content": text})
+                    
+                    response_text = await llm_service.generate_response(
+                        conversation_history,
+                        agent_id=agent_id
+                    )
+                    llm_time = time.time() - llm_start
+                    
+                    conversation_history.append({"role": "assistant", "content": response_text})
+                    
+                    # Envia resposta textual
+                    await websocket.send_json({
+                        "type": "response",
+                        "text": response_text,
+                        "latency_ms": int(llm_time * 1000)
+                    })
+                    
+                    total_time = time.time() - start_time
+                    
+                    # Envia mensagem de conclusão
+                    await websocket.send_json({
+                        "type": "text_complete",
+                        "latency_ms": int(total_time * 1000),
+                        "breakdown": {
+                            "llm_ms": int(llm_time * 1000),
+                            "text_only": True
+                        }
+                    })
+                    
+                    print(f"✅ Resposta enviada: {response_text[:100]}...")
+                    
+                except Exception as e:
+                    print(f"❌ Erro ao processar mensagem de texto: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": f"Erro ao processar: {str(e)}"
+                    })
+            
             elif message["type"] == "reset":
                 # Limpa histórico de conversa
                 conversation_history = []
@@ -449,16 +513,20 @@ class StreamingSession:
         """Processa texto sem TTS."""
         start = time.time()
         
+        print(f"🧠 Iniciando process_text_only para: {text[:50]}...")
+        
         try:
             self.conversation_history.append({"role": "user", "content": text})
             full_response = ""
             
+            print(f"🔄 Chamando LLM streaming...")
             async for token in llm_service.generate_response_streaming(
                 self.conversation_history, agent_id=self.agent_id
             ):
                 full_response += token
                 await self.send({"type": "response_chunk", "text": token, "full_text": full_response})
             
+            print(f"✅ LLM retornou: {full_response[:100]}...")
             llm_time = time.time() - start
             
             if full_response:
@@ -472,6 +540,9 @@ class StreamingSession:
             })
             
         except Exception as e:
+            print(f"❌ Erro em process_text_only: {e}")
+            import traceback
+            traceback.print_exc()
             await self.send({"type": "error", "error": str(e)})
 
 
@@ -535,9 +606,14 @@ async def websocket_stream(websocket: WebSocket, agent_id: Optional[str] = None)
             
             elif message["type"] == "text_message":
                 text = message.get("text", "").strip()
+                print(f"📝 Mensagem de texto recebida: {text}")
                 if text:
                     await session.send({"type": "transcript", "text": text, "is_final": True})
+                    print(f"🔄 Processando texto com LLM...")
                     await session.process_text_only(text)
+                    print(f"✅ Texto processado com sucesso")
+                else:
+                    print(f"⚠️ Texto vazio recebido")
                     
     except WebSocketDisconnect:
         print("📞 Conexão streaming encerrada")
