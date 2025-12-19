@@ -62,22 +62,39 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           name: user.name,
           role: user.role,
           image: user.image,
+          forcePasswordChange: user.forcePasswordChange,
         };
       },
     }),
   ],
   callbacks: {
-    async jwt({ token, user }) {
+    async jwt({ token, user, trigger, session }) {
       if (user) {
         token.id = user.id;
         token.role = (user as { role?: string }).role || "USER";
+        token.forcePasswordChange = (user as { forcePasswordChange?: boolean }).forcePasswordChange || false;
       }
+
+      // Permite atualizar o token quando a sessão é atualizada (ex: após trocar senha)
+      if (trigger === "update" && session) {
+        // Busca dados atualizados do banco
+        const updatedUser = await prisma.user.findUnique({
+          where: { id: token.id as string },
+          select: { forcePasswordChange: true, role: true }
+        });
+        if (updatedUser) {
+          token.forcePasswordChange = updatedUser.forcePasswordChange;
+          token.role = updatedUser.role;
+        }
+      }
+
       return token;
     },
     async session({ session, token }) {
       if (session.user) {
         session.user.id = token.id as string;
         session.user.role = token.role as string;
+        session.user.forcePasswordChange = token.forcePasswordChange as boolean;
       }
       return session;
     },

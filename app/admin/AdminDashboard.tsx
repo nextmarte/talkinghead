@@ -4,6 +4,9 @@ import { useState } from "react";
 import { signOut, useSession } from "next-auth/react";
 import Link from "next/link";
 import ConversationViewer from "./ConversationViewer";
+import UserActions from "./UserActions";
+import InvitationManager from "./InvitationManager";
+import CreateUserModal from "./CreateUserModal";
 
 interface User {
   id: string;
@@ -42,8 +45,10 @@ export default function AdminDashboard({
   recentConversations,
 }: AdminDashboardProps) {
   const { data: session } = useSession();
-  const [activeTab, setActiveTab] = useState<"overview" | "users" | "conversations">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "users" | "conversations" | "invitations">("overview");
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [showCreateUserModal, setShowCreateUserModal] = useState(false);
 
   const formatDate = (date: Date) => {
     return new Date(date).toLocaleDateString("pt-BR", {
@@ -162,7 +167,7 @@ export default function AdminDashboard({
 
         {/* Tabs */}
         <div className="flex gap-2 mb-6">
-          {(["overview", "users", "conversations"] as const).map((tab) => (
+          {(["overview", "users", "conversations", "invitations"] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -175,6 +180,7 @@ export default function AdminDashboard({
               {tab === "overview" && "Visão Geral"}
               {tab === "users" && "Usuários"}
               {tab === "conversations" && "Conversas"}
+              {tab === "invitations" && "Convites"}
             </button>
           ))}
         </div>
@@ -184,9 +190,19 @@ export default function AdminDashboard({
           {/* Users Tab */}
           {(activeTab === "overview" || activeTab === "users") && (
             <div className="p-6">
-              <h2 className="text-lg font-semibold text-white mb-4">
-                {activeTab === "overview" ? "Usuários Recentes" : "Todos os Usuários"}
-              </h2>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold text-white">
+                  {activeTab === "overview" ? "Usuários Recentes" : "Todos os Usuários"}
+                </h2>
+                {activeTab === "users" && (
+                  <button
+                    onClick={() => setShowCreateUserModal(true)}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition"
+                  >
+                    + Criar Usuário
+                  </button>
+                )}
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full">
                   <thead>
@@ -196,6 +212,7 @@ export default function AdminDashboard({
                       <th className="text-left py-3 px-4 text-slate-400 font-medium">Role</th>
                       <th className="text-left py-3 px-4 text-slate-400 font-medium">Conversas</th>
                       <th className="text-left py-3 px-4 text-slate-400 font-medium">Criado em</th>
+                      <th className="text-left py-3 px-4 text-slate-400 font-medium">Ações</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -216,6 +233,9 @@ export default function AdminDashboard({
                         </td>
                         <td className="py-3 px-4 text-slate-300">{user._count.conversations}</td>
                         <td className="py-3 px-4 text-slate-400 text-sm">{formatDate(user.createdAt)}</td>
+                        <td className="py-3 px-4">
+                          <UserActions user={user} onActionComplete={() => window.location.reload()} />
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -274,6 +294,13 @@ export default function AdminDashboard({
               </div>
             </div>
           )}
+
+          {/* Invitations Tab */}
+          {activeTab === "invitations" && (
+            <div className="p-6">
+              <InvitationManager />
+            </div>
+          )}
         </div>
       </main>
 
@@ -284,6 +311,12 @@ export default function AdminDashboard({
           onClose={() => setSelectedConversationId(null)}
         />
       )}
+
+      <CreateUserModal
+        isOpen={showCreateUserModal}
+        onClose={() => setShowCreateUserModal(false)}
+        onUserCreated={() => window.location.reload()}
+      />
     </div>
   );
 }

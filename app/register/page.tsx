@@ -1,18 +1,27 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 
-export default function RegisterPage() {
+function RegisterForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [invitationToken, setInvitationToken] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    const token = searchParams.get("token");
+    if (token) {
+      setInvitationToken(token);
+    }
+  }, [searchParams]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -35,7 +44,7 @@ export default function RegisterPage() {
       const res = await fetch("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, password }),
+        body: JSON.stringify({ name, email, password, invitationToken }),
       });
 
       const data = await res.json();
@@ -142,6 +151,21 @@ export default function RegisterPage() {
               />
             </div>
 
+            {/* Invitation Token */}
+            <div>
+              <label htmlFor="invitationToken" className="block text-sm font-medium text-slate-300 mb-2">
+                Código de Convite
+              </label>
+              <input
+                id="invitationToken"
+                type="text"
+                value={invitationToken}
+                onChange={(e) => setInvitationToken(e.target.value)}
+                className="w-full px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent transition"
+                placeholder="Opcional (ou obrigatório se configurado)"
+              />
+            </div>
+
             {/* Submit */}
             <button
               type="submit"
@@ -179,5 +203,13 @@ export default function RegisterPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+export default function RegisterPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-slate-900" />}>
+      <RegisterForm />
+    </Suspense>
   );
 }

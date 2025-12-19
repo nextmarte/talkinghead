@@ -57,6 +57,7 @@ export default function AgentsDashboard({ agents: initialAgents }: AgentsDashboa
   const [showEditor, setShowEditor] = useState(false);
   const [showKnowledge, setShowKnowledge] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [filterStatus, setFilterStatus] = useState<"all" | "published" | "draft">("all");
 
   const formatDate = (date: Date) => {
     return new Date(date).toLocaleDateString("pt-BR", {
@@ -85,6 +86,19 @@ export default function AgentsDashboard({ agents: initialAgents }: AgentsDashboa
   };
 
   const handleToggleActive = async (agent: Agent) => {
+    // Impedir que o agente padrão seja despublicado
+    if (agent.isDefault && agent.isActive) {
+      alert("Não é possível despublicar o agente padrão. Defina outro agente como padrão primeiro.");
+      return;
+    }
+
+    // Solicitar confirmação ao despublicar
+    if (agent.isActive) {
+      if (!confirm(`Tem certeza que deseja despublicar "${agent.name}"? Ele não aparecerá mais para os usuários.`)) {
+        return;
+      }
+    }
+
     try {
       const res = await fetch(`/api/agents/${agent.id}`, {
         method: "PUT",
@@ -157,6 +171,22 @@ export default function AgentsDashboard({ agents: initialAgents }: AgentsDashboa
     }
   };
 
+  const getPublicationStatusColor = (isActive: boolean) => {
+    return isActive
+      ? "bg-green-500/20 text-green-400"
+      : "bg-yellow-500/20 text-yellow-400";
+  };
+
+  const getPublicationStatusText = (isActive: boolean) => {
+    return isActive ? "Publicado" : "Rascunho";
+  };
+
+  const filteredAgents = agents.filter((agent) => {
+    if (filterStatus === "published") return agent.isActive;
+    if (filterStatus === "draft") return !agent.isActive;
+    return true;
+  });
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
       {/* Header */}
@@ -194,6 +224,42 @@ export default function AgentsDashboard({ agents: initialAgents }: AgentsDashboa
 
       {/* Main */}
       <main className="max-w-7xl mx-auto px-6 py-8">
+        {/* Filtro de Status */}
+        {agents.length > 0 && (
+          <div className="mb-6 flex gap-2">
+            <button
+              onClick={() => setFilterStatus("all")}
+              className={`px-4 py-2 rounded-lg font-medium transition ${
+                filterStatus === "all"
+                  ? "bg-blue-500 text-white"
+                  : "bg-slate-700/50 text-slate-300 hover:text-white"
+              }`}
+            >
+              Todos ({agents.length})
+            </button>
+            <button
+              onClick={() => setFilterStatus("published")}
+              className={`px-4 py-2 rounded-lg font-medium transition ${
+                filterStatus === "published"
+                  ? "bg-green-500 text-white"
+                  : "bg-slate-700/50 text-slate-300 hover:text-white"
+              }`}
+            >
+              Publicados ({agents.filter((a) => a.isActive).length})
+            </button>
+            <button
+              onClick={() => setFilterStatus("draft")}
+              className={`px-4 py-2 rounded-lg font-medium transition ${
+                filterStatus === "draft"
+                  ? "bg-yellow-500 text-white"
+                  : "bg-slate-700/50 text-slate-300 hover:text-white"
+              }`}
+            >
+              Rascunhos ({agents.filter((a) => !a.isActive).length})
+            </button>
+          </div>
+        )}
+
         {agents.length === 0 ? (
           <div className="text-center py-16">
             <div className="w-16 h-16 rounded-full bg-slate-700/50 flex items-center justify-center mx-auto mb-4">
@@ -214,7 +280,7 @@ export default function AgentsDashboard({ agents: initialAgents }: AgentsDashboa
           </div>
         ) : (
           <div className="grid gap-6">
-            {agents.map((agent) => (
+            {filteredAgents.map((agent) => (
               <div
                 key={agent.id}
                 className="bg-slate-800/50 rounded-2xl border border-slate-700/50 overflow-hidden"
@@ -248,13 +314,9 @@ export default function AgentsDashboard({ agents: initialAgents }: AgentsDashboa
                           </span>
                         )}
                         <span
-                          className={`px-2 py-0.5 rounded text-xs font-medium ${
-                            agent.isActive
-                              ? "bg-green-500/20 text-green-400"
-                              : "bg-slate-600/50 text-slate-400"
-                          }`}
+                          className={`px-2 py-0.5 rounded text-xs font-medium ${getPublicationStatusColor(agent.isActive)}`}
                         >
-                          {agent.isActive ? "Ativo" : "Inativo"}
+                          {getPublicationStatusText(agent.isActive)}
                         </span>
                       </div>
                       <p className="text-slate-400 text-sm line-clamp-2 mb-3">
@@ -297,20 +359,37 @@ export default function AgentsDashboard({ agents: initialAgents }: AgentsDashboa
                       </button>
                       <button
                         onClick={() => handleToggleActive(agent)}
-                        className={`p-2 rounded-lg transition ${
-                          agent.isActive
-                            ? "text-green-400 hover:bg-green-500/20"
-                            : "text-slate-400 hover:bg-slate-700/50"
+                        disabled={agent.isDefault && agent.isActive}
+                        className={`flex items-center gap-2 px-3 py-2 rounded-lg transition ${
+                          agent.isDefault && agent.isActive
+                            ? "opacity-50 cursor-not-allowed bg-slate-700/20 text-slate-400"
+                            : agent.isActive
+                            ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+                            : "bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30"
                         }`}
-                        title={agent.isActive ? "Desativar" : "Ativar"}
+                        title={
+                          agent.isDefault && agent.isActive
+                            ? "Não é possível despublicar o agente padrão"
+                            : agent.isActive
+                            ? "Despublicar agente"
+                            : "Publicar agente"
+                        }
                       >
-                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          {agent.isActive ? (
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                          ) : (
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-                          )}
-                        </svg>
+                        {agent.isActive ? (
+                          <>
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                            </svg>
+                            <span className="text-sm font-medium">Publicado</span>
+                          </>
+                        ) : (
+                          <>
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                            </svg>
+                            <span className="text-sm font-medium">Rascunho</span>
+                          </>
+                        )}
                       </button>
                       <button
                         onClick={() => handleDeleteAgent(agent)}
@@ -337,6 +416,20 @@ export default function AgentsDashboard({ agents: initialAgents }: AgentsDashboa
                 )}
               </div>
             ))}
+          </div>
+        )}
+        
+        {agents.length > 0 && filteredAgents.length === 0 && (
+          <div className="text-center py-16">
+            <div className="w-16 h-16 rounded-full bg-slate-700/50 flex items-center justify-center mx-auto mb-4">
+              <svg className="w-8 h-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            <h2 className="text-xl font-semibold text-white mb-2">Nenhum agente encontrado</h2>
+            <p className="text-slate-400">
+              Nenhum agente corresponde ao filtro selecionado.
+            </p>
           </div>
         )}
       </main>

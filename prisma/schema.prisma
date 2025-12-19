@@ -14,15 +14,16 @@ datasource db {
 // ============================================
 
 model User {
-  id            String    @id @default(cuid())
-  name          String?
-  email         String    @unique
-  emailVerified DateTime?
-  password      String?   // Para credentials provider
-  image         String?
-  role          Role      @default(USER)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id                  String    @id @default(cuid())
+  name                String?
+  email               String    @unique
+  emailVerified       DateTime?
+  password            String?   // Para credentials provider
+  image               String?
+  role                Role      @default(USER)
+  forcePasswordChange Boolean   @default(false)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   // Relations
   accounts      Account[]
@@ -194,4 +195,17 @@ enum MessageRole {
   USER
   ASSISTANT
   SYSTEM
+}
+
+model Invitation {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  email     String?  // Opcional: convite para um email específico
+  role      Role     @default(USER)
+  expiresAt DateTime
+  usedAt    DateTime?
+  usedBy    String?  @unique // ID do usuário que usou
+  createdAt DateTime @default(now())
+
+  @@map("invitations")
 }

@@ -9,7 +9,7 @@ interface LatencyBreakdown {
 }
 
 interface WebSocketMessage {
-  type: 'transcript' | 'response' | 'audio' | 'audio_chunk' | 'audio_complete' | 'reset_ack' | 'error';
+  type: 'transcript' | 'response' | 'audio' | 'audio_chunk' | 'audio_complete' | 'reset_ack' | 'error' | 'text_complete';
   text?: string;
   data?: string;
   sample_rate?: number;

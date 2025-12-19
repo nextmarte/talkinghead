@@ -207,16 +207,6 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
   }, [agentId]);
 
   // Desconecta
-  const disconnect = useCallback(() => {
-    stopListening();
-    audioQueueRef.current = [];
-    stopCurrentAudio();
-    setIsSpeaking(false);
-    wsRef.current?.close();
-    wsRef.current = null;
-    setIsConnected(false);
-  }, [stopListening, stopCurrentAudio]);
-
   // Para áudio atual
   const stopCurrentAudio = useCallback(() => {
     if (currentSourceRef.current) {
@@ -226,6 +216,46 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
       currentSourceRef.current = null;
     }
   }, []);
+
+  // Para escuta
+  const stopListening = useCallback(() => {
+    // Para o processador
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+
+    // Para a fonte
+    if (sourceRef.current) {
+      sourceRef.current.disconnect();
+      sourceRef.current = null;
+    }
+
+    // Para o stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+
+    // Envia sinal de fim manual (força processamento do buffer)
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'audio_end' }));
+    }
+
+    setIsListening(false);
+    setIsUserSpeaking(false);
+    console.log('🔇 Escuta parada');
+  }, []);
+
+  const disconnect = useCallback(() => {
+    stopListening();
+    audioQueueRef.current = [];
+    stopCurrentAudio();
+    setIsSpeaking(false);
+    wsRef.current?.close();
+    wsRef.current = null;
+    setIsConnected(false);
+  }, [stopListening, stopCurrentAudio]);
 
   // Toca áudio
   const playAudio = async (base64Data: string, sampleRate: number): Promise<void> => {
@@ -376,36 +406,6 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
       console.error('Erro ao iniciar escuta:', err);
     }
   }, [isConnected]);
-
-  // Para escuta
-  const stopListening = useCallback(() => {
-    // Para o processador
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
-    }
-
-    // Para a fonte
-    if (sourceRef.current) {
-      sourceRef.current.disconnect();
-      sourceRef.current = null;
-    }
-
-    // Para o stream
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-
-    // Envia sinal de fim manual (força processamento do buffer)
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'audio_end' }));
-    }
-
-    setIsListening(false);
-    setIsUserSpeaking(false);
-    console.log('🔇 Escuta parada');
-  }, []);
 
   // Interrompe resposta do agente
   const interrupt = useCallback(() => {
