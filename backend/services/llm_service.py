@@ -85,17 +85,20 @@ class LLMService:
             if last_user_message:
                 rag_context = await rag_service.get_context_for_query(
                     agent_id, 
-                    last_user_message
+                    last_user_message,
+                    agent_name=agent.name
                 )
                 print(f"🧠 LLM: RAG context length={len(rag_context)} chars")
         
         # Monta mensagens com contexto RAG
-        messages = [{"role": "system", "content": system_prompt}]
-        
         if rag_context:
-            messages.append({"role": "system", "content": rag_context})
-            print(f"📚 LLM: RAG contexto injetado no prompt!")
+            # Injeta o contexto RAG DEPOIS do system prompt
+            # Assim as instruções de persona vêm primeiro, seguidas pelos dados
+            combined_prompt = f"{system_prompt}\n\n{rag_context}"
+            messages = [{"role": "system", "content": combined_prompt}]
+            print(f"📚 LLM: RAG contexto injetado após o system prompt!")
         else:
+            messages = [{"role": "system", "content": system_prompt}]
             print(f"⚠️ LLM: Sem contexto RAG!")
         
         messages.extend(conversation_history[-10:])  # Últimas 10 mensagens
@@ -103,14 +106,23 @@ class LLMService:
         print(f"🧠 LLM: Enviando {len(messages)} mensagens ao modelo {self.model} ({self.provider})")
         
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=self.max_tokens,
-                temperature=temperature,
-                presence_penalty=0.1,
-                frequency_penalty=0.1
-            )
+            # Parâmetros base
+            params = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature
+            }
+            
+            # Ajusta parâmetros conforme o modelo
+            if "gpt-5" in self.model or self.model.startswith("o1"):
+                params["max_completion_tokens"] = self.max_tokens
+                # Modelos de raciocínio/GPT-5 podem não suportar penalties
+            else:
+                params["max_tokens"] = self.max_tokens
+                params["presence_penalty"] = 0.1
+                params["frequency_penalty"] = 0.1
+                
+            response = await self.client.chat.completions.create(**params)
             
             return response.choices[0].message.content.strip()
         except Exception as e:
@@ -118,14 +130,21 @@ class LLMService:
             if self.provider != "openai":
                 print(f"⚠️ LLM: Erro no {self.provider}: {e}. Tentando fallback OpenAI...")
                 try:
-                    response = await self.fallback_client.chat.completions.create(
-                        model=self.fallback_model,
-                        messages=messages,
-                        max_tokens=self.max_tokens,
-                        temperature=temperature,
-                        presence_penalty=0.1,
-                        frequency_penalty=0.1
-                    )
+                    # Parâmetros fallback
+                    fallback_params = {
+                        "model": self.fallback_model,
+                        "messages": messages,
+                        "temperature": temperature
+                    }
+                    
+                    if "gpt-5" in self.fallback_model or self.fallback_model.startswith("o1"):
+                        fallback_params["max_completion_tokens"] = self.max_tokens
+                    else:
+                        fallback_params["max_tokens"] = self.max_tokens
+                        fallback_params["presence_penalty"] = 0.1
+                        fallback_params["frequency_penalty"] = 0.1
+                        
+                    response = await self.fallback_client.chat.completions.create(**fallback_params)
                     return response.choices[0].message.content.strip()
                 except Exception as fallback_error:
                     print(f"❌ LLM: Fallback também falhou: {fallback_error}")
@@ -165,7 +184,8 @@ class LLMService:
             if last_user_message:
                 rag_context = await rag_service.get_context_for_query(
                     agent_id, 
-                    last_user_message
+                    last_user_message,
+                    agent_name=agent.name
                 )
         
         # Log do RAG
@@ -175,23 +195,37 @@ class LLMService:
             print(f"⚠️ LLM: Sem contexto RAG para agent={agent_id}")
         
         # Monta mensagens com contexto RAG
-        messages = [{"role": "system", "content": system_prompt}]
-        
         if rag_context:
-            messages.append({"role": "system", "content": rag_context})
+            # Injeta o contexto RAG DEPOIS do system prompt
+            combined_prompt = f"{system_prompt}\n\n{rag_context}"
+            messages = [{"role": "system", "content": combined_prompt}]
+            print(f"📚 LLM Streaming: RAG contexto injetado após o system prompt!")
+        else:
+            messages = [{"role": "system", "content": system_prompt}]
+            print(f"⚠️ LLM Streaming: Sem contexto RAG para agent={agent_id}")
         
         messages.extend(conversation_history[-10:])
         
         print(f"🧠 LLM Streaming: Usando {self.provider} - {self.model}")
         
         try:
-            stream = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=self.max_tokens,
-                temperature=temperature,
-                stream=True
-            )
+            # Parâmetros base
+            params = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "stream": True
+            }
+            
+            # Ajusta parâmetro de tokens conforme o modelo
+            if "gpt-5" in self.model or self.model.startswith("o1"):
+                params["max_completion_tokens"] = self.max_tokens
+            else:
+                params["max_tokens"] = self.max_tokens
+            
+            print(f"🧠 LLM Streaming: Chamando API com params: { {k: v for k, v in params.items() if k != 'messages'} }")
+                
+            stream = await self.client.chat.completions.create(**params)
             
             async for chunk in stream:
                 if chunk.choices[0].delta.content:
@@ -201,13 +235,20 @@ class LLMService:
             if self.provider != "openai":
                 print(f"⚠️ LLM Streaming: Erro no {self.provider}: {e}. Tentando fallback OpenAI...")
                 try:
-                    stream = await self.fallback_client.chat.completions.create(
-                        model=self.fallback_model,
-                        messages=messages,
-                        max_tokens=self.max_tokens,
-                        temperature=temperature,
-                        stream=True
-                    )
+                    # Parâmetros fallback
+                    fallback_params = {
+                        "model": self.fallback_model,
+                        "messages": messages,
+                        "temperature": temperature,
+                        "stream": True
+                    }
+                    
+                    if "gpt-5" in self.fallback_model or self.fallback_model.startswith("o1"):
+                        fallback_params["max_completion_tokens"] = self.max_tokens
+                    else:
+                        fallback_params["max_tokens"] = self.max_tokens
+                        
+                    stream = await self.fallback_client.chat.completions.create(**fallback_params)
                     
                     async for chunk in stream:
                         if chunk.choices[0].delta.content:

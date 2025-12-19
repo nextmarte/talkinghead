@@ -617,6 +617,7 @@ async def websocket_stream(websocket: WebSocket, agent_id: Optional[str] = None)
                     
     except WebSocketDisconnect:
         print("📞 Conexão streaming encerrada")
+        await session.interrupt()
     except Exception as e:
         print(f"Erro no WebSocket stream: {e}")
         import traceback

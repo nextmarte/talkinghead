@@ -33,20 +33,24 @@ CHUNK_OVERLAP = 200
 # Prompt para Query Rewriting
 QUERY_REWRITE_PROMPT = """Você é um especialista em reformular perguntas para busca semântica.
 
-A base de conhecimento contém informações sobre UMA PESSOA específica (biografia, carreira, opiniões, declarações).
+A base de conhecimento contém informações sobre uma pessoa, sua carreira, a instituição onde trabalha (UFF) e temas relacionados.
 
-Reformule a pergunta do usuário para encontrar informações PESSOAIS sobre essa pessoa.
+Reformule a pergunta do usuário para encontrar informações relevantes na base de conhecimento.
 
 REGRAS:
-1. Adicione termos biográficos relevantes (biografia, perfil, trajetória, histórico pessoal)
-2. Expanda com sinônimos do tema principal
-3. Seja conciso (máximo 40 palavras)
-4. NÃO responda a pergunta
+1. Corrija possíveis erros de digitação em nomes próprios ou locais conhecidos (ex: "Garigolatá" -> "Gragoatá")
+2. Adicione termos relacionados que ajudem na busca (ex: se perguntar de um local, adicione "histórico", "relação com a UFF", "posicionamento")
+3. Expanda com sinônimos do tema principal
+4. Seja conciso (máximo 40 palavras)
+5. NÃO responda a pergunta
 
 Exemplos:
-- "qual sua formação?" → "formação acadêmica graduação mestrado doutorado universidade curso diploma biografia"
-- "onde você trabalha?" → "carreira profissional trabalho emprego cargo atuação trajetória"
-- "o que você acha de X?" → "opinião posicionamento declaração sobre X afirmou disse"
+- "qual sua formação?" → "formação acadêmica graduação mestrado doutorado universidade curso diploma"
+- "onde você nasceu?" → "local de nascimento cidade natal origem onde nasceu infância família pais"
+- "onde você trabalha?" → "carreira profissional trabalho emprego cargo atuação trajetória UFF"
+- "o que você acha de X?" → "X opinião posicionamento declaração sobre X afirmou disse debates"
+- "quem são seus pais?" → "família pais pai mãe Lia Cergio parentes"
+- "morro do garigolatá" → "Morro do Gragoatá UFF histórico território desapropriação"
 
 Pergunta: {query}
 
@@ -283,7 +287,7 @@ class RAGService:
             return None
         
         text_fields = [
-            'text', 'content', 'description', 'caption', 'title', 
+            'text', 'content', 'trecho', 'description', 'caption', 'title', 
             'body', 'message', 'post', 'comment', 'bio', 'biografia'
         ]
         
@@ -575,7 +579,8 @@ class RAGService:
         self, 
         agent_id: str, 
         query: str,
-        max_tokens: int = 1500
+        max_tokens: int = 1500,
+        agent_name: Optional[str] = None
     ) -> str:
         """
         Retorna contexto formatado para injetar no prompt do LLM.
@@ -586,25 +591,27 @@ class RAGService:
             agent_id: ID do agente
             query: Pergunta do usuário
             max_tokens: Limite aproximado de tokens
+            agent_name: Nome do agente para personalizar instruções
             
         Returns:
             Contexto formatado para o prompt
         """
-        print(f"🔍 RAG: Buscando contexto para agent={agent_id}, query='{query[:50]}...'")
+        print(f"🔍 RAG: Buscando contexto para agent={agent_id} ({agent_name or 'sem nome'}), query='{query[:50]}...'")
         
         # Query Rewriting: reformula a pergunta para busca mais eficiente
         rewritten_query = await self._rewrite_query(query)
         
         # Busca única e unificada: todos os documentos com peso igual
         # MMR garante diversidade nos resultados
-        results = await self.search(agent_id, rewritten_query, k=10, use_mmr=True, doc_type_filter=None)
+        # Aumentamos k para 15 para garantir que pegamos debates e biografias
+        results = await self.search(agent_id, rewritten_query, k=15, use_mmr=True, doc_type_filter=None)
         
         print(f"🔍 RAG: Encontrados {len(results)} chunks")
         
         # Se não encontrou com a reformulada, tenta com a original
         if not results:
             print(f"⚠️ RAG: Tentando busca com query original...")
-            results = await self.search(agent_id, query, k=10, use_mmr=True, doc_type_filter=None)
+            results = await self.search(agent_id, query, k=15, use_mmr=True, doc_type_filter=None)
         
         if not results:
             print(f"⚠️ RAG: Nenhum documento encontrado para agent={agent_id}")
@@ -650,18 +657,25 @@ class RAGService:
         
         context = "\n\n---\n\n".join(context_parts)
         
+        persona_name = agent_name if agent_name else "o agente"
+        
         return f"""
-=== INFORMAÇÕES DA SUA BASE DE CONHECIMENTO ===
+=== MATERIAL DE TREINAMENTO FORNECIDO (BASE DE CONHECIMENTO) ===
 
 {context}
 
-=== INSTRUÇÕES IMPORTANTES ===
+=== INSTRUÇÕES ADICIONAIS PARA O USO DO MATERIAL ===
 
-1. PRIORIZE SEMPRE as informações acima ao responder.
-2. Se houver informações sobre o tema na base de conhecimento, USE-AS como fonte primária.
-3. Cite fatos, datas, nomes e detalhes específicos da base quando disponíveis.
-4. Se a base contiver opiniões ou declarações suas, reproduza-as fielmente.
-5. Apenas complemente com conhecimento geral se a base não tiver informação suficiente.
+1. VOCÊ É {persona_name.upper()}. O material acima contém suas falas, biografia e posicionamentos oficiais.
+2. Use as informações fornecidas como sua própria voz, conhecimento e opinião.
+3. Se o material contiver transcrições de debates ou falas em primeira pessoa (ex: "XXX_Roberto Salles"), assuma-as como suas.
+4. Se o material mencionar sua trajetória (ex: "Da Ilha do Governador para a UFF"), interprete como sua origem ou local de nascimento/criação.
+5. PRIORIZE SEMPRE as informações acima ao responder.
+6. Se o tema for mencionado no material, responda de forma AFIRMATIVA e DIRETA.
+7. NUNCA use frases como "Não tenho posição registrada" ou "Não há informações" se o assunto aparecer no material acima.
+8. Seja cuidadoso para não assumir falas de outras pessoas como suas (ex: se o texto cita outra pessoa dizendo "Eu nasci em X", verifique se o nome dessa pessoa é diferente do seu).
+9. Cite fatos, datas, nomes e detalhes específicos do material quando disponíveis.
+10. Apenas complemente com conhecimento geral se o material não tiver informação suficiente.
 """
     
     async def delete_collection(self, agent_id: str) -> bool:

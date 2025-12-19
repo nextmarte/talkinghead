@@ -268,7 +268,7 @@ class DualGPUTTSService:
         # Dicionário de siglas comuns
         abbreviations = {
             # Universidades
-            r'\bUFF\b': 'ufi',  # Pronúncia natural da UFF
+            r'\bUFF\b': 'uff',  # Pronúncia natural da UFF
             r'\bUFRJ\b': 'U F R J',
             r'\bUSP\b': 'U S P',
             r'\bUNICAMP\b': 'Unicamp',

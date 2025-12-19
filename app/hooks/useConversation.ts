@@ -46,6 +46,7 @@ export function useConversation(options: UseConversationOptions = {}) {
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recordingStartTimeRef = useRef<number>(0);
+  const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
   
   // Fila de áudio para streaming
   const audioQueueRef = useRef<{data: string, sampleRate: number, sentence?: string}[]>([]);
@@ -162,12 +163,31 @@ export function useConversation(options: UseConversationOptions = {}) {
     wsRef.current = ws;
   }, [agentId]);
 
+  // Para a reprodução de áudio
+  const stopAudioPlayback = useCallback(() => {
+    // Limpa a fila
+    audioQueueRef.current = [];
+    isPlayingQueueRef.current = false;
+    setIsSpeaking(false);
+
+    // Para o áudio atual
+    if (currentSourceRef.current) {
+      try {
+        currentSourceRef.current.stop();
+      } catch (e) {
+        // Ignora se já parou
+      }
+      currentSourceRef.current = null;
+    }
+  }, []);
+
   // Desconecta
   const disconnect = useCallback(() => {
+    stopAudioPlayback();
     wsRef.current?.close();
     wsRef.current = null;
     setIsConnected(false);
-  }, []);
+  }, [stopAudioPlayback]);
 
   // Toca áudio recebido
   const playAudio = async (base64Data: string, sampleRate: number): Promise<void> => {
@@ -203,9 +223,15 @@ export function useConversation(options: UseConversationOptions = {}) {
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
+      currentSourceRef.current = source;
       
       return new Promise<void>((resolve) => {
-        source.onended = () => resolve();
+        source.onended = () => {
+          if (currentSourceRef.current === source) {
+            currentSourceRef.current = null;
+          }
+          resolve();
+        };
         source.start();
       });
     } catch (err) {

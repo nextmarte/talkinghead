@@ -209,10 +209,13 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
   // Desconecta
   const disconnect = useCallback(() => {
     stopListening();
+    audioQueueRef.current = [];
+    stopCurrentAudio();
+    setIsSpeaking(false);
     wsRef.current?.close();
     wsRef.current = null;
     setIsConnected(false);
-  }, []);
+  }, [stopListening, stopCurrentAudio]);
 
   // Para áudio atual
   const stopCurrentAudio = useCallback(() => {
@@ -411,6 +414,7 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
     }
     audioQueueRef.current = [];
     stopCurrentAudio();
+    setIsSpeaking(false);
   }, [stopCurrentAudio]);
 
   // Reset da conversa
