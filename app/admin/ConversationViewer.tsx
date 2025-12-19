@@ -36,6 +36,7 @@ export default function ConversationViewer({ conversationId, onClose }: Conversa
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [searchTerm, setSearchTerm] = useState("");
 
   useEffect(() => {
     async function fetchConversation() {
@@ -72,31 +73,84 @@ export default function ConversationViewer({ conversationId, onClose }: Conversa
     return `${local.slice(0, 2)}***@${domain}`;
   };
 
+  // Filtra mensagens por termo de busca
+  const filteredMessages = conversation?.messages.filter((msg) =>
+    msg.content.toLowerCase().includes(searchTerm.toLowerCase())
+  ) || [];
+
+  // Destaca o termo de busca no texto
+  const highlightText = (text: string, highlight: string) => {
+    if (!highlight.trim()) return text;
+    const regex = new RegExp(`(${highlight})`, "gi");
+    const parts = text.split(regex);
+    return parts.map((part, i) =>
+      regex.test(part) ? (
+        <mark key={i} className="bg-yellow-500/30 text-yellow-200 px-1 rounded">
+          {part}
+        </mark>
+      ) : (
+        part
+      )
+    );
+  };
+
   return (
     <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
       <div className="bg-slate-800 rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col border border-slate-700">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-white">
-              {conversation?.title || "Conversa"}
-            </h2>
-            {conversation && (
-              <p className="text-sm text-slate-400">
-                Usuário: {anonymizeEmail(conversation.user.email)} • 
-                {conversation.mode === "LIVE_CALL" ? " 📞 Ligação" : " 🎤 Push-to-Talk"} • 
-                {conversation.messages.length} mensagens
-              </p>
+        <div className="px-6 py-4 border-b border-slate-700">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h2 className="text-lg font-semibold text-white">
+                {conversation?.title || "Conversa"}
+              </h2>
+              {conversation && (
+                <p className="text-sm text-slate-400">
+                  Usuário: {anonymizeEmail(conversation.user.email)} • 
+                  {conversation.mode === "LIVE_CALL" ? " 📞 Ligação" : " 🎤 Push-to-Talk"} • 
+                  {conversation.messages.length} mensagens
+                </p>
+              )}
+            </div>
+            <button
+              onClick={onClose}
+              className="p-2 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition"
+            >
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          
+          {/* Busca dentro da conversa */}
+          <div className="relative">
+            <input
+              type="text"
+              placeholder="Buscar nas mensagens..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full px-4 py-2 pl-10 bg-slate-700/50 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
+            />
+            <svg className="w-5 h-5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            {searchTerm && (
+              <button
+                onClick={() => setSearchTerm("")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
             )}
           </div>
-          <button
-            onClick={onClose}
-            className="p-2 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition"
-          >
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          
+          {searchTerm && conversation && (
+            <p className="text-sm text-slate-400 mt-2">
+              {filteredMessages.length} {filteredMessages.length === 1 ? "mensagem encontrada" : "mensagens encontradas"}
+            </p>
+          )}
         </div>
 
         {/* Content */}
@@ -115,10 +169,12 @@ export default function ConversationViewer({ conversationId, onClose }: Conversa
 
           {conversation && (
             <div className="space-y-4">
-              {conversation.messages.length === 0 ? (
-                <p className="text-slate-500 text-center py-8">Nenhuma mensagem nesta conversa</p>
+              {filteredMessages.length === 0 ? (
+                <p className="text-slate-500 text-center py-8">
+                  {searchTerm ? "Nenhuma mensagem encontrada com esse termo" : "Nenhuma mensagem nesta conversa"}
+                </p>
               ) : (
-                conversation.messages.map((msg) => (
+                filteredMessages.map((msg) => (
                   <div
                     key={msg.id}
                     className={`flex ${msg.role === "USER" ? "justify-end" : "justify-start"}`}
@@ -142,7 +198,9 @@ export default function ConversationViewer({ conversationId, onClose }: Conversa
                           {formatDate(msg.createdAt)}
                         </span>
                       </div>
-                      <p className="text-white whitespace-pre-wrap">{msg.content}</p>
+                      <p className="text-white whitespace-pre-wrap">
+                        {highlightText(msg.content, searchTerm)}
+                      </p>
                       
                       {/* Latência (se disponível) */}
                       {(msg.sttLatencyMs || msg.llmLatencyMs || msg.ttsLatencyMs) && (
