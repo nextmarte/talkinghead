@@ -24,6 +24,11 @@ export default function KnowledgeUploader({
   const [documents, setDocuments] = useState(initialDocuments);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [showPasteForm, setShowPasteForm] = useState(false);
+  const [pasteTitle, setPasteTitle] = useState("");
+  const [pasteContent, setPasteContent] = useState("");
+  const [pasteError, setPasteError] = useState<string | null>(null);
+  const [isPasting, setIsPasting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const formatSize = (bytes: number) => {
@@ -155,13 +160,83 @@ export default function KnowledgeUploader({
     }
   };
 
+  const handlePasteSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasteError(null);
+
+    // Validação
+    if (!pasteTitle.trim()) {
+      setPasteError("O título é obrigatório");
+      return;
+    }
+    if (!pasteContent.trim()) {
+      setPasteError("O conteúdo é obrigatório");
+      return;
+    }
+
+    if (pasteContent.length > 1000000) {
+      setPasteError("O conteúdo é muito grande (máximo 1MB)");
+      return;
+    }
+
+    setIsPasting(true);
+
+    try {
+      // Cria um arquivo virtual de texto
+      const blob = new Blob([pasteContent], { type: "text/plain" });
+      const file = new File([blob], `${pasteTitle.replace(/[^a-zA-Z0-9\s-]/g, "")}.txt`, { type: "text/plain" });
+
+      // Cria FormData e envia
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const res = await fetch(`/api/agents/${agentId}/knowledge`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (res.ok) {
+        const doc = await res.json();
+        setDocuments((prev) => [doc, ...prev]);
+        
+        // Limpa formulário
+        setPasteTitle("");
+        setPasteContent("");
+        setPasteError(null);
+        setShowPasteForm(false);
+        
+        onUpdate();
+      } else {
+        const data = await res.json();
+        setPasteError(data.error || "Erro ao enviar documento");
+      }
+    } catch (err) {
+      console.error("Erro ao colar documento:", err);
+      setPasteError(err instanceof Error ? err.message : "Erro desconhecido");
+    } finally {
+      setIsPasting(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h4 className="font-medium text-white">Base de Conhecimento</h4>
-        <span className="text-sm text-slate-400">
-          {documents.length} documento(s)
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-slate-400">
+            {documents.length} documento(s)
+          </span>
+          <button
+            onClick={() => setShowPasteForm(true)}
+            className="flex items-center gap-2 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition"
+            title="Adicionar conteúdo colando da área de transferência"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            Colar
+          </button>
+        </div>
       </div>
 
       {/* Upload Area */}
@@ -290,6 +365,119 @@ export default function KnowledgeUploader({
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Paste Knowledge Modal */}
+      {showPasteForm && (
+        <div className="fixed inset-0 bg-black/50 z-40 flex items-center justify-center p-4">
+          <div className="bg-slate-800 rounded-2xl max-w-2xl w-full border border-slate-700 shadow-xl">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-white">Adicionar Conteúdo à Base</h3>
+                <p className="text-sm text-slate-400">Cole o conteúdo da área de transferência</p>
+              </div>
+              <button
+                onClick={() => {
+                  setShowPasteForm(false);
+                  setPasteTitle("");
+                  setPasteContent("");
+                  setPasteError(null);
+                }}
+                className="p-2 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition"
+              >
+                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Form */}
+            <form onSubmit={handlePasteSubmit} className="p-6 space-y-4">
+              {/* Title Input */}
+              <div>
+                <label className="block text-sm font-medium text-white mb-2">
+                  Título do Documento <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={pasteTitle}
+                  onChange={(e) => setPasteTitle(e.target.value)}
+                  placeholder="ex: Política de Privacidade, Termos de Serviço..."
+                  className="w-full px-4 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500"
+                  disabled={isPasting}
+                />
+              </div>
+
+              {/* Content Textarea */}
+              <div>
+                <label className="block text-sm font-medium text-white mb-2">
+                  Conteúdo do Documento <span className="text-red-400">*</span>
+                </label>
+                <textarea
+                  value={pasteContent}
+                  onChange={(e) => setPasteContent(e.target.value)}
+                  placeholder="Cole o conteúdo aqui (Ctrl+V ou Cmd+V)..."
+                  rows={12}
+                  className="w-full px-4 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500 font-mono text-sm resize-none"
+                  disabled={isPasting}
+                />
+                <p className="text-xs text-slate-500 mt-2">
+                  {pasteContent.length.toLocaleString()} caracteres (máximo 1.000.000)
+                </p>
+              </div>
+
+              {/* Error Message */}
+              {pasteError && (
+                <div className="px-4 py-3 bg-red-500/20 text-red-400 rounded-lg text-sm flex items-center gap-2">
+                  <svg className="w-5 h-5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                  </svg>
+                  {pasteError}
+                </div>
+              )}
+
+              {/* Buttons */}
+              <div className="flex gap-3 justify-end pt-4">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPasteForm(false);
+                    setPasteTitle("");
+                    setPasteContent("");
+                    setPasteError(null);
+                  }}
+                  disabled={isPasting}
+                  className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-medium transition disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={isPasting || !pasteTitle.trim() || !pasteContent.trim()}
+                  className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isPasting ? (
+                    <>
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                      Enviando...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                      </svg>
+                      Adicionar Documento
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </div>

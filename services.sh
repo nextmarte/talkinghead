@@ -21,6 +21,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Path do bun
+export PATH="/home/marcus/.bun/bin:$PATH"
+
 print_status() {
     echo -e "${GREEN}[✓]${NC} $1"
 }
