@@ -76,7 +76,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       }
 
       // Permite atualizar o token quando a sessão é atualizada (ex: após trocar senha)
-      if (trigger === "update" && session) {
+      if (trigger === "update") {
         // Busca dados atualizados do banco
         const updatedUser = await prisma.user.findUnique({
           where: { id: token.id as string },
@@ -85,6 +85,13 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         if (updatedUser) {
           token.forcePasswordChange = updatedUser.forcePasswordChange;
           token.role = updatedUser.role;
+        }
+
+        // Se houver dados manuais passados no update({ ... })
+        if (session) {
+          if (session.name) token.name = session.name;
+          if (session.email) token.email = session.email;
+          if (session.image) token.image = session.image;
         }
       }
 
