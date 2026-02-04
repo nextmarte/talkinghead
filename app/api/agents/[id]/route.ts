@@ -63,7 +63,7 @@ export async function PUT(
 
     const { id } = await params;
     const body = await req.json();
-    const { name, description, systemPrompt, avatar, voiceSample, isActive, isDefault, voiceGender, voicePitch, voiceSpeed, useElevenLabs, elevenLabsVoiceId } = body;
+    const { name, description, systemPrompt, avatar, voiceSample, isActive, isDefault, isPublic, voiceGender, voicePitch, voiceSpeed, useElevenLabs, elevenLabsVoiceId } = body;
 
     // Verifica se agente existe
     const existing = await prisma.agent.findUnique({ where: { id } });
@@ -97,6 +97,7 @@ export async function PUT(
         ...(voiceSample !== undefined && { voiceSample }),
         ...(isActive !== undefined && { isActive }),
         ...(isDefault !== undefined && { isDefault }),
+        ...(isPublic !== undefined && { isPublic }),
         ...(voiceGender !== undefined && { voiceGender }),
         ...(voicePitch !== undefined && { voicePitch }),
         ...(voiceSpeed !== undefined && { voiceSpeed }),

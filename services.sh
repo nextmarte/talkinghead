@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
 FRONTEND_DIR="$SCRIPT_DIR"
 
+# Porta do backend (main_streaming.py - suporta push-to-talk E ligação)
 BACKEND_PORT=8583
 FRONTEND_PORT=8584
 
@@ -38,7 +39,7 @@ print_warning() {
 
 # Funções de controle do Backend
 start_backend() {
-    if pgrep -f "uvicorn.*main:app.*$BACKEND_PORT" > /dev/null; then
+    if pgrep -f "uvicorn.*main_streaming:app.*$BACKEND_PORT" > /dev/null; then
         print_warning "Backend já está rodando"
         return 0
     fi
@@ -46,11 +47,11 @@ start_backend() {
     echo "Iniciando Backend na porta $BACKEND_PORT..."
     cd "$BACKEND_DIR"
     source .venv/bin/activate
-    nohup uvicorn main:app --host 0.0.0.0 --port $BACKEND_PORT > "$BACKEND_LOG" 2>&1 &
+    nohup uvicorn main_streaming:app --host 0.0.0.0 --port $BACKEND_PORT > "$BACKEND_LOG" 2>&1 &
     
-    # Aguardar inicialização
-    echo "Aguardando backend carregar modelos (pode demorar ~30s)..."
-    for i in {1..60}; do
+    # Aguardar inicialização (TTS pode demorar ~60s para carregar)
+    echo "Aguardando backend carregar modelos TTS (pode demorar ~60s)..."
+    for i in {1..90}; do
         if curl -s "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then
             print_status "Backend iniciado com sucesso!"
             return 0
@@ -64,10 +65,11 @@ start_backend() {
 
 stop_backend() {
     echo "Parando Backend..."
+    pkill -f "uvicorn.*main_streaming:app" 2>/dev/null
     pkill -f "uvicorn.*main:app" 2>/dev/null
     sleep 1
-    if pgrep -f "uvicorn.*main:app" > /dev/null; then
-        pkill -9 -f "uvicorn.*main:app" 2>/dev/null
+    if pgrep -f "uvicorn.*main" > /dev/null; then
+        pkill -9 -f "uvicorn.*main" 2>/dev/null
     fi
     print_status "Backend parado"
 }
@@ -161,6 +163,7 @@ case "$1" in
         stop_frontend
         stop_backend
         sleep 2
+        build_frontend
         start_backend
         start_frontend
         echo ""

@@ -38,6 +38,7 @@ interface Agent {
   elevenLabsVoiceId: string | null;
   isActive: boolean;
   isDefault: boolean;
+  isPublic: boolean | null;
   createdAt: Date;
   _count: {
     conversations: number;

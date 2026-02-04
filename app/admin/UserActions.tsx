@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useSession } from "next-auth/react";
+import UserAgentAccessModal from "./UserAgentAccessModal";
 
 interface User {
   id: string;
@@ -24,6 +25,7 @@ export default function UserActions({ user, onActionComplete }: UserActionsProps
   const [error, setError] = useState<string | null>(null);
   const [resetPassword, setResetPassword] = useState("");
   const [showPasswordInput, setShowPasswordInput] = useState(false);
+  const [showAgentAccessModal, setShowAgentAccessModal] = useState(false);
 
   if (!session?.user || session.user.role !== "ADMIN") {
     return null;
@@ -136,6 +138,15 @@ export default function UserActions({ user, onActionComplete }: UserActionsProps
                 🔑 Resetar Senha
               </button>
               <button
+                onClick={() => {
+                  setShowAgentAccessModal(true);
+                  setIsOpen(false);
+                }}
+                className="w-full text-left px-4 py-2 text-sm text-slate-300 hover:bg-slate-800 transition"
+              >
+                🤖 Gerenciar Agentes
+              </button>
+              <button
                 onClick={handleChangeRole}
                 disabled={isLoading}
                 className="w-full text-left px-4 py-2 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-50 transition"
@@ -151,6 +162,14 @@ export default function UserActions({ user, onActionComplete }: UserActionsProps
             </>
           )}
         </div>
+      )}
+
+      {/* Modal de acesso a agentes */}
+      {showAgentAccessModal && (
+        <UserAgentAccessModal
+          userId={user.id}
+          onClose={() => setShowAgentAccessModal(false)}
+        />
       )}
     </div>
   );

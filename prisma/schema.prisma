@@ -30,6 +30,7 @@ model User {
   sessions      Session[]
   conversations Conversation[]
   agentsCreated Agent[]        @relation("AgentCreator")
+  agentAccess   UserAgentAccess[]  // Agentes que o usuário tem acesso
 
   @@map("users")
 }
@@ -104,6 +105,9 @@ model Agent {
   useElevenLabs      Boolean  @default(false)      // Usar ElevenLabs em vez de Coqui TTS
   elevenLabsVoiceId  String?                       // Voice ID do ElevenLabs
   
+  // Controle de acesso
+  isPublic     Boolean  @default(true)   // Se false, apenas usuários com acesso podem usar
+  
   isActive     Boolean  @default(true)
   isDefault    Boolean  @default(false) // Assistente padrão
   createdAt    DateTime @default(now())
@@ -114,6 +118,7 @@ model Agent {
   createdBy     User            @relation("AgentCreator", fields: [createdById], references: [id])
   conversations Conversation[]
   knowledgeBase KnowledgeBase[]
+  userAccess    UserAgentAccess[]  // Usuários com acesso a este agente
 
   @@map("agents")
 }
@@ -208,4 +213,25 @@ model Invitation {
   createdAt DateTime @default(now())
 
   @@map("invitations")
+}
+
+// ============================================
+// ACCESS CONTROL
+// ============================================
+
+model UserAgentAccess {
+  id        String   @id @default(cuid())
+  userId    String
+  agentId   String
+  grantedAt DateTime @default(now())
+  grantedBy String?  // ID do admin que concedeu acesso
+
+  // Relations
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, agentId])
+  @@index([userId])
+  @@index([agentId])
+  @@map("user_agent_access")
 }

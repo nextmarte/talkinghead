@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 
 interface Agent {
   id: string;
@@ -16,6 +16,7 @@ interface Agent {
   elevenLabsVoiceId: string | null;
   isActive: boolean;
   isDefault: boolean;
+  isPublic: boolean | null;
 }
 
 interface AgentEditorProps {
@@ -32,6 +33,7 @@ export default function AgentEditor({ agent, onClose }: AgentEditorProps) {
   const [description, setDescription] = useState(agent?.description || "");
   const [systemPrompt, setSystemPrompt] = useState(agent?.systemPrompt || "");
   const [isDefault, setIsDefault] = useState(agent?.isDefault || false);
+  const [isPublic, setIsPublic] = useState(agent?.isPublic !== false); // default true
   const [avatar, setAvatar] = useState<string | null>(agent?.avatar || null);
   const [voiceSample, setVoiceSample] = useState<string | null>(agent?.voiceSample || null);
   const [voiceGender, setVoiceGender] = useState(agent?.voiceGender || "neutral");
@@ -42,6 +44,120 @@ export default function AgentEditor({ agent, onClose }: AgentEditorProps) {
   
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const voiceInputRef = useRef<HTMLInputElement>(null);
+  
+  // Estados para gravação de áudio
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const MAX_RECORDING_TIME = 10; // segundos
+
+  // Limpar timer ao desmontar
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+        mediaRecorderRef.current.stop();
+      }
+    };
+  }, []);
+
+  // Iniciar gravação
+  const startRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'audio/webm;codecs=opus'
+      });
+      
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+      
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+      
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        setAudioBlob(audioBlob);
+        stream.getTracks().forEach(track => track.stop());
+      };
+      
+      mediaRecorder.start(100);
+      setIsRecording(true);
+      setRecordingTime(0);
+      setAudioBlob(null);
+      
+      // Timer para atualizar tempo e parar automaticamente em 10s
+      timerRef.current = setInterval(() => {
+        setRecordingTime(prev => {
+          if (prev >= MAX_RECORDING_TIME - 1) {
+            stopRecording();
+            return MAX_RECORDING_TIME;
+          }
+          return prev + 1;
+        });
+      }, 1000);
+      
+    } catch (err) {
+      console.error('Erro ao acessar microfone:', err);
+      setError('Não foi possível acessar o microfone. Verifique as permissões.');
+    }
+  }, []);
+
+  // Parar gravação
+  const stopRecording = useCallback(() => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop();
+    }
+    setIsRecording(false);
+  }, []);
+
+  // Upload do áudio gravado
+  const uploadRecordedAudio = async () => {
+    if (!audioBlob || !agent) return;
+    
+    // Converter webm para wav/mp3 não é trivial no browser, 
+    // então enviamos webm e o backend converte se necessário
+    const formData = new FormData();
+    formData.append("file", audioBlob, "voice_recording.webm");
+
+    try {
+      const res = await fetch(`/api/agents/${agent.id}/voice`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setVoiceSample(data.voiceSample);
+        setAudioBlob(null);
+        setRecordingTime(0);
+      } else {
+        const data = await res.json();
+        setError(data.error || 'Erro ao enviar áudio gravado');
+      }
+    } catch (err) {
+      console.error("Erro ao fazer upload de áudio gravado:", err);
+      setError('Erro ao enviar áudio gravado');
+    }
+  };
+
+  // Descartar gravação
+  const discardRecording = () => {
+    setAudioBlob(null);
+    setRecordingTime(0);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -60,6 +176,7 @@ export default function AgentEditor({ agent, onClose }: AgentEditorProps) {
           description: description || null,
           systemPrompt,
           isDefault,
+          isPublic,
           voiceGender,
           voicePitch,
           voiceSpeed,
@@ -191,9 +308,19 @@ export default function AgentEditor({ agent, onClose }: AgentEditorProps) {
                 <label className="block text-sm font-medium text-slate-300 mb-2">
                   Sample de Voz
                 </label>
-                <div className="flex items-center gap-4">
-                  <div className="w-16 h-16 rounded-xl bg-slate-700 flex items-center justify-center">
-                    {voiceSample ? (
+                <div className="flex items-center gap-3">
+                  <div className="w-16 h-16 rounded-xl bg-slate-700 flex items-center justify-center relative">
+                    {isRecording ? (
+                      <div className="relative">
+                        <svg className="w-8 h-8 text-red-400 animate-pulse" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+                          <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+                        </svg>
+                        <span className="absolute -bottom-1 -right-1 text-xs font-bold text-red-400 bg-slate-800 px-1 rounded">
+                          {MAX_RECORDING_TIME - recordingTime}s
+                        </span>
+                      </div>
+                    ) : voiceSample || audioBlob ? (
                       <svg className="w-8 h-8 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                       </svg>
@@ -203,13 +330,83 @@ export default function AgentEditor({ agent, onClose }: AgentEditorProps) {
                       </svg>
                     )}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => voiceInputRef.current?.click()}
-                    className="px-3 py-2 bg-slate-700 text-slate-300 rounded-lg text-sm hover:bg-slate-600 transition"
-                  >
-                    {voiceSample ? "Trocar Áudio" : "Enviar Áudio"}
-                  </button>
+                  
+                  <div className="flex flex-col gap-2">
+                    {/* Botões de gravação */}
+                    {!audioBlob && !isRecording && (
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={startRecording}
+                          className="px-3 py-2 bg-red-500/20 text-red-400 rounded-lg text-sm hover:bg-red-500/30 transition flex items-center gap-1"
+                        >
+                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                            <circle cx="12" cy="12" r="6"/>
+                          </svg>
+                          Gravar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => voiceInputRef.current?.click()}
+                          className="px-3 py-2 bg-slate-700 text-slate-300 rounded-lg text-sm hover:bg-slate-600 transition"
+                        >
+                          {voiceSample ? "Trocar Áudio" : "Enviar Áudio"}
+                        </button>
+                      </div>
+                    )}
+                    
+                    {/* Botão parar gravação */}
+                    {isRecording && (
+                      <button
+                        type="button"
+                        onClick={stopRecording}
+                        className="px-3 py-2 bg-red-500 text-white rounded-lg text-sm hover:bg-red-600 transition flex items-center gap-2"
+                      >
+                        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                          <rect x="6" y="6" width="12" height="12"/>
+                        </svg>
+                        Parar ({recordingTime}s / {MAX_RECORDING_TIME}s)
+                      </button>
+                    )}
+                    
+                    {/* Prévia e ações do áudio gravado */}
+                    {audioBlob && !isRecording && (
+                      <div className="flex flex-col gap-2">
+                        <audio 
+                          controls 
+                          src={URL.createObjectURL(audioBlob)} 
+                          className="h-8 w-full"
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={uploadRecordedAudio}
+                            className="px-3 py-1.5 bg-green-500 text-white rounded-lg text-xs hover:bg-green-600 transition flex items-center gap-1"
+                          >
+                            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/>
+                            </svg>
+                            Usar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={discardRecording}
+                            className="px-3 py-1.5 bg-slate-600 text-slate-300 rounded-lg text-xs hover:bg-slate-500 transition"
+                          >
+                            Descartar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={startRecording}
+                            className="px-3 py-1.5 bg-red-500/20 text-red-400 rounded-lg text-xs hover:bg-red-500/30 transition"
+                          >
+                            Regravar
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  
                   <input
                     ref={voiceInputRef}
                     type="file"
@@ -219,7 +416,7 @@ export default function AgentEditor({ agent, onClose }: AgentEditorProps) {
                   />
                 </div>
                 <p className="text-xs text-slate-500 mt-1">
-                  Recomendado: 10-30 segundos de fala clara
+                  Grave até 10 segundos ou envie um arquivo. Recomendado: fala clara sem ruído.
                 </p>
               </div>
             </div>
@@ -397,18 +594,54 @@ export default function AgentEditor({ agent, onClose }: AgentEditorProps) {
             </p>
           </div>
 
-          {/* Is Default */}
-          <div className="flex items-center gap-3">
-            <input
-              type="checkbox"
-              id="isDefault"
-              checked={isDefault}
-              onChange={(e) => setIsDefault(e.target.checked)}
-              className="w-4 h-4 rounded bg-slate-700 border-slate-600 text-purple-500 focus:ring-purple-500"
-            />
-            <label htmlFor="isDefault" className="text-sm text-slate-300">
-              Definir como agente padrão (substitui o assistente geral)
-            </label>
+          {/* Configurações de Acesso */}
+          <div className="p-4 bg-slate-700/50 rounded-xl space-y-3">
+            <h3 className="text-sm font-medium text-slate-300 flex items-center gap-2">
+              <svg className="w-4 h-4 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+              </svg>
+              Controle de Acesso
+            </h3>
+
+            {/* Is Public */}
+            <div className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                id="isPublic"
+                checked={isPublic}
+                onChange={(e) => setIsPublic(e.target.checked)}
+                className="mt-1 w-4 h-4 rounded bg-slate-700 border-slate-600 text-purple-500 focus:ring-purple-500"
+              />
+              <div>
+                <label htmlFor="isPublic" className="text-sm text-slate-300 cursor-pointer">
+                  Agente Público
+                </label>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {isPublic 
+                    ? "Todos os usuários podem usar este agente" 
+                    : "Apenas usuários com acesso específico podem usar este agente"}
+                </p>
+              </div>
+            </div>
+
+            {/* Is Default */}
+            <div className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                id="isDefault"
+                checked={isDefault}
+                onChange={(e) => setIsDefault(e.target.checked)}
+                className="mt-1 w-4 h-4 rounded bg-slate-700 border-slate-600 text-purple-500 focus:ring-purple-500"
+              />
+              <div>
+                <label htmlFor="isDefault" className="text-sm text-slate-300 cursor-pointer">
+                  Agente Padrão
+                </label>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Será usado como assistente principal quando nenhum outro for selecionado
+                </p>
+              </div>
+            </div>
           </div>
         </form>
 

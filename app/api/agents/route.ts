@@ -2,14 +2,53 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import prisma from "@/lib/prisma";
 
-// GET /api/agents - Lista agentes ativos (público) ou todos (admin)
+// GET /api/agents - Lista agentes ativos que o usuário tem acesso
 export async function GET(req: NextRequest) {
   try {
     const session = await auth();
     const isAdmin = session?.user?.role === "ADMIN";
+    const userId = session?.user?.id;
     
+    // Admin vê todos
+    if (isAdmin) {
+      const agents = await prisma.agent.findMany({
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          avatar: true,
+          isActive: true,
+          isDefault: true,
+          isPublic: true,
+          createdAt: true,
+          _count: {
+            select: {
+              conversations: true,
+              knowledgeBase: true,
+            },
+          },
+        },
+        orderBy: [
+          { isDefault: "desc" },
+          { name: "asc" },
+        ],
+      });
+      return NextResponse.json(agents);
+    }
+    
+    // Usuário comum: agentes públicos + agentes com acesso explícito
     const agents = await prisma.agent.findMany({
-      where: isAdmin ? {} : { isActive: true },
+      where: {
+        isActive: true,
+        OR: [
+          { isPublic: true },
+          ...(userId ? [{
+            userAccess: {
+              some: { userId }
+            }
+          }] : [])
+        ]
+      },
       select: {
         id: true,
         name: true,
@@ -52,7 +91,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { name, description, systemPrompt, avatar, voiceSample, isDefault, voiceGender, voicePitch, voiceSpeed, useElevenLabs, elevenLabsVoiceId } = body;
+    const { name, description, systemPrompt, avatar, voiceSample, isDefault, isPublic, voiceGender, voicePitch, voiceSpeed, useElevenLabs, elevenLabsVoiceId } = body;
 
     if (!name || !systemPrompt) {
       return NextResponse.json(
@@ -88,6 +127,7 @@ export async function POST(req: NextRequest) {
         voicePitch: voicePitch || 1.0,
         voiceSpeed: voiceSpeed || 1.0,
         isDefault: isDefault || false,
+        isPublic: isPublic !== false, // default true
         useElevenLabs: useElevenLabs || false,
         elevenLabsVoiceId: useElevenLabs ? elevenLabsVoiceId?.trim() : null,
         createdById: session.user.id!,

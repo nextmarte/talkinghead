@@ -192,6 +192,7 @@ class DualGPUTTSService:
         self.tts_gpu0 = TTS(model_name).to(device)
         self.tts_gpu1 = None
         self.use_dual_gpu = False
+        self.use_openai = False
         
         models_dir = Path(__file__).parent.parent / "models"
         reference_voice = models_dir / "reference_voice.wav"
@@ -209,6 +210,7 @@ class DualGPUTTSService:
         self.use_openai = True
         self.is_xtts = False
         self.sample_rate = 24000
+        self.speaker_wav = None
         print("✅ TTS (OpenAI) configurado como fallback")
     
     def _synthesize_openai(self, text: str) -> Tuple[np.ndarray, int]:
