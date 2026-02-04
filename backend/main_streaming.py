@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from services.tts_dual_gpu import DualGPUTTSService
+from services.tts_qwen3 import Qwen3TTSService
 from services.stt_service import STTService
 from services.llm_service import LLMService
 from services.vad_service import VADService
@@ -32,8 +33,11 @@ from routers.agents import router as agents_router
 
 load_dotenv()
 
+# Tipo de TTS service (Coqui ou Qwen3)
+TTSServiceType = DualGPUTTSService | Qwen3TTSService
+
 # Serviços globais
-tts_service: Optional[DualGPUTTSService] = None
+tts_service: Optional[TTSServiceType] = None
 stt_service: Optional[STTService] = None
 llm_service: Optional[LLMService] = None
 vad_service: Optional[VADService] = None
@@ -49,9 +53,15 @@ async def lifespan(app: FastAPI):
     
     loop = asyncio.get_event_loop()
     
-    # TTS Dual-GPU
-    tts_service = await loop.run_in_executor(None, DualGPUTTSService)
-    print(f"✅ TTS Dual-GPU carregado")
+    # TTS - seleciona baseado na configuração
+    tts_provider = os.getenv("TTS_PROVIDER", "coqui").lower()
+    
+    if tts_provider == "qwen3":
+        tts_service = await loop.run_in_executor(None, Qwen3TTSService)
+        print(f"✅ TTS Qwen3 carregado")
+    else:
+        tts_service = await loop.run_in_executor(None, DualGPUTTSService)
+        print(f"✅ TTS Coqui Dual-GPU carregado")
     
     # STT
     stt_service = await loop.run_in_executor(None, STTService)
@@ -109,6 +119,24 @@ async def health_check():
             "vad": vad_service is not None,
         }
     }
+
+
+@app.post("/tts/cache/invalidate/{agent_id}")
+async def invalidate_tts_cache(agent_id: str):
+    """Invalida cache de voz do TTS para um agente específico."""
+    if tts_service and hasattr(tts_service, 'invalidate_cache'):
+        tts_service.invalidate_cache(agent_id)
+        return {"status": "invalidated", "agent_id": agent_id}
+    return {"status": "no_cache", "agent_id": agent_id}
+
+
+@app.post("/tts/cache/invalidate")
+async def invalidate_all_tts_cache():
+    """Invalida todo o cache de voz do TTS."""
+    if tts_service and hasattr(tts_service, 'invalidate_cache'):
+        tts_service.invalidate_cache()
+        return {"status": "all_invalidated"}
+    return {"status": "no_cache"}
 
 
 class ConversationSession:
@@ -219,15 +247,13 @@ class ConversationSession:
                 "latency_ms": int(stt_time * 1000)
             })
             
-            # === FASE 2: LLM STREAMING → TTS PARALELO ===
+            # === FASE 2: LLM STREAMING → TTS COM TEXTO COMPLETO ===
             llm_start = time.time()
             
             self.conversation_history.append({"role": "user", "content": transcript})
             
-            # Buffer para acumular texto até formar sentença
-            text_buffer = ""
+            # Acumula TODO o texto da resposta
             full_response = ""
-            sentences_sent = 0
             first_audio_sent = False
             first_audio_time = 0
             
@@ -242,67 +268,7 @@ class ConversationSession:
                 "gender": agent_config.voice_gender,
             }
             
-            # Fila de sentenças para TTS
-            tts_queue: asyncio.Queue = asyncio.Queue()
-            tts_results: list = []
-            
-            async def tts_worker():
-                """Worker que processa TTS em paralelo."""
-                nonlocal first_audio_sent, first_audio_time
-                
-                sentence_index = 0
-                while True:
-                    try:
-                        sentence = await asyncio.wait_for(tts_queue.get(), timeout=10)
-                        
-                        if sentence is None:  # Sinal de fim
-                            break
-                        
-                        if self.should_interrupt:
-                            break
-                        
-                        # Sintetiza usando GPU apropriada com config de voz (ou ElevenLabs)
-                        gpu_id = sentence_index % 2
-                        audio_array, audio_sr = await loop.run_in_executor(
-                            None, tts_service.synthesize, sentence, gpu_id, self.agent_id, voice_config, agent_config
-                        )
-                        
-                        if self.should_interrupt:
-                            break
-                        
-                        if len(audio_array) > 0:
-                            # Marca tempo do primeiro áudio
-                            if not first_audio_sent:
-                                first_audio_time = time.time() - pipeline_start
-                                first_audio_sent = True
-                            
-                            # Converte e envia
-                            audio_int16 = (audio_array * 32767).astype(np.int16)
-                            audio_base64 = base64.b64encode(audio_int16.tobytes()).decode()
-                            
-                            await self.send({
-                                "type": "audio_chunk",
-                                "data": audio_base64,
-                                "sample_rate": audio_sr,
-                                "chunk_index": sentence_index,
-                                "sentence": sentence,
-                                "latency_ms": int((time.time() - pipeline_start) * 1000)
-                            })
-                            
-                            tts_results.append((sentence_index, len(audio_array) / audio_sr))
-                        
-                        sentence_index += 1
-                        tts_queue.task_done()
-                        
-                    except asyncio.TimeoutError:
-                        break
-                    except asyncio.CancelledError:
-                        break
-            
-            # Inicia worker TTS
-            self.current_tts_task = asyncio.create_task(tts_worker())
-            
-            # Processa stream do LLM
+            # Processa stream do LLM - apenas acumula
             async for token in llm_service.generate_response_streaming(
                 self.conversation_history,
                 agent_id=self.agent_id
@@ -310,51 +276,45 @@ class ConversationSession:
                 if self.should_interrupt:
                     break
                 
-                text_buffer += token
                 full_response += token
                 
-                # Envia preview do texto
+                # Envia preview do texto em tempo real
                 await self.send({
                     "type": "response_chunk",
                     "text": token,
                     "full_text": full_response
                 })
+            
+            # === FASE 3: TTS COM TEXTO COMPLETO ===
+            if full_response.strip() and not self.should_interrupt:
+                print(f"🎵 Sintetizando texto completo ({len(full_response)} chars)...")
                 
-                # Verifica se temos chunk pronto para TTS
-                # Envia mais cedo: após pontuação ou vírgula ou 80+ chars
-                should_send = False
-                
-                # Pontuação final - sempre envia
-                if re.search(r'[.!?]\s*$', text_buffer):
-                    should_send = True
-                # Vírgula, dois-pontos, ponto-e-vírgula com 30+ chars
-                elif len(text_buffer) >= 30 and re.search(r'[,;:]\s*$', text_buffer):
-                    should_send = True
-                # Buffer muito grande (80+ chars) - força envio
-                elif len(text_buffer) >= 80:
-                    should_send = True
-                
-                if should_send:
-                    chunk_to_send = text_buffer.strip()
-                    text_buffer = ""
+                try:
+                    # Sintetiza TODO o texto de uma vez
+                    audio_array, audio_sr = await loop.run_in_executor(
+                        None, tts_service.synthesize, full_response, 0, self.agent_id, voice_config, agent_config
+                    )
                     
-                    if chunk_to_send:
-                        await tts_queue.put(chunk_to_send)
-                        sentences_sent += 1
-            
-            # Processa última sentença (pode não ter pontuação final)
-            if text_buffer.strip() and not self.should_interrupt:
-                await tts_queue.put(text_buffer.strip())
-                sentences_sent += 1
-            
-            # Sinaliza fim do TTS
-            await tts_queue.put(None)
-            
-            # Aguarda TTS terminar
-            try:
-                await asyncio.wait_for(self.current_tts_task, timeout=30)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                pass
+                    if len(audio_array) > 0 and not self.should_interrupt:
+                        first_audio_time = time.time() - pipeline_start
+                        first_audio_sent = True
+                        
+                        # Converte e envia áudio completo como um único chunk
+                        audio_int16 = (audio_array * 32767).astype(np.int16)
+                        audio_base64 = base64.b64encode(audio_int16.tobytes()).decode()
+                        
+                        await self.send({
+                            "type": "audio_chunk",
+                            "data": audio_base64,
+                            "sample_rate": audio_sr,
+                            "chunk_index": 0,
+                            "sentence": full_response,
+                            "latency_ms": int((time.time() - pipeline_start) * 1000)
+                        })
+                        
+                        print(f"✅ Áudio sintetizado: {len(audio_array) / audio_sr:.1f}s")
+                except Exception as e:
+                    print(f"❌ Erro ao sintetizar: {e}")
             
             llm_time = time.time() - llm_start
             total_time = time.time() - pipeline_start
@@ -383,7 +343,6 @@ class ConversationSession:
                     "llm_ms": int(llm_time * 1000),
                     "first_audio_ms": int(first_audio_time * 1000) if first_audio_sent else 0,
                     "total_ms": int(total_time * 1000),
-                    "sentences": sentences_sent,
                     "streaming": True
                 }
             })

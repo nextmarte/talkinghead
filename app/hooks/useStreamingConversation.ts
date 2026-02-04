@@ -64,10 +64,6 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
   const streamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  
-  // Fila de áudio para reprodução suave
-  const audioQueueRef = useRef<{data: string, sampleRate: number}[]>([]);
-  const isPlayingQueueRef = useRef(false);
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
   // Conecta ao WebSocket (modo streaming)
@@ -152,23 +148,36 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
           break;
 
         case 'audio_chunk':
-          // Adiciona chunk à fila e inicia reprodução
+          // Recebe e toca áudio completo imediatamente
           if (message.data) {
-            console.log(`🎵 audio_chunk recebido (sr=${message.sample_rate}, idx=${message.chunk_index})`);
-            audioQueueRef.current.push({
-              data: message.data,
-              sampleRate: message.sample_rate!,
-            });
-            processAudioQueue();
+            console.log(`🎵 audio_chunk recebido (sr=${message.sample_rate})`);
+            
+            // Decodifica o áudio em float32
+            const binaryString = atob(message.data);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+            }
+            const int16Array = new Int16Array(bytes.buffer);
+            const float32Array = new Float32Array(int16Array.length);
+            for (let i = 0; i < int16Array.length; i++) {
+              float32Array[i] = int16Array[i] / 32768.0;
+            }
+            
+            // Toca áudio completo contínuo
+            playAudioContinuous(float32Array, message.sample_rate!);
+            setIsSpeaking(true);
           }
           break;
 
         case 'audio_complete':
+          // Marca fim da síntese (áudio já foi tocado)
           setIsProcessing(false);
+          setIsSpeaking(false);
           if (message.breakdown) {
             setLatency(message.breakdown);
             const b = message.breakdown;
-            console.log(`📊 Streaming - 1º áudio: ${b.first_audio_ms}ms, Total: ${b.total_ms}ms, Sentenças: ${b.sentences}`);
+            console.log(`📊 Streaming - 1º áudio: ${b.first_audio_ms}ms, Total: ${b.total_ms}ms`);
           }
           break;
 
@@ -183,8 +192,7 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
           break;
 
         case 'interrupted':
-          // Limpa fila de áudio
-          audioQueueRef.current = [];
+          // Interrompe reprodução de áudio
           stopCurrentAudio();
           setIsSpeaking(false);
           console.log('⚠️ Resposta interrompida');
@@ -249,7 +257,6 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
 
   const disconnect = useCallback(() => {
     stopListening();
-    audioQueueRef.current = [];
     stopCurrentAudio();
     setIsSpeaking(false);
     wsRef.current?.close();
@@ -258,22 +265,11 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
   }, [stopListening, stopCurrentAudio]);
 
   // Toca áudio
-  const playAudio = async (base64Data: string, sampleRate: number): Promise<void> => {
+  // Toca áudio contínuo completo
+  const playAudioContinuous = async (float32Array: Float32Array, sampleRate: number): Promise<void> => {
     try {
-      console.log(`🔊 playAudio: iniciando (sr=${sampleRate}, size=${base64Data.length})`);
+      console.log(`🔊 Tocando áudio (sr=${sampleRate}, size=${float32Array.length} samples)`);
       
-      const binaryString = atob(base64Data);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
-
-      const int16Array = new Int16Array(bytes.buffer);
-      const float32Array = new Float32Array(int16Array.length);
-      for (let i = 0; i < int16Array.length; i++) {
-        float32Array[i] = int16Array[i] / 32768.0;
-      }
-
       if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
         console.log(`🔊 Criando novo AudioContext (sr=${sampleRate})`);
         audioContextRef.current = new AudioContext({ sampleRate });
@@ -297,6 +293,7 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
       return new Promise<void>((resolve) => {
         source.onended = () => {
           console.log(`🔊 Áudio terminou`);
+          setIsSpeaking(false);
           if (currentSourceRef.current === source) {
             currentSourceRef.current = null;
           }
@@ -307,30 +304,9 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
       });
     } catch (err) {
       console.error('❌ Erro ao tocar áudio:', err);
+      setIsSpeaking(false);
     }
   };
-
-  // Processa fila de áudio
-  const processAudioQueue = useCallback(async () => {
-    if (isPlayingQueueRef.current || audioQueueRef.current.length === 0) {
-      console.log(`⏭️ processAudioQueue: skipped (playing=${isPlayingQueueRef.current}, queue_length=${audioQueueRef.current.length})`);
-      return;
-    }
-    
-    console.log(`⏭️ processAudioQueue: iniciando (${audioQueueRef.current.length} chunks)`);
-    isPlayingQueueRef.current = true;
-    setIsSpeaking(true);
-    
-    while (audioQueueRef.current.length > 0) {
-      const chunk = audioQueueRef.current.shift()!;
-      console.log(`⏭️ Tocando chunk (sr=${chunk.sampleRate})`);
-      await playAudio(chunk.data, chunk.sampleRate);
-    }
-    
-    console.log(`⏭️ processAudioQueue: finalizado`);
-    isPlayingQueueRef.current = false;
-    setIsSpeaking(false);
-  }, []);
 
   // Inicia escuta contínua (modo streaming)
   const startListening = useCallback(async () => {
@@ -412,7 +388,6 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'interrupt' }));
     }
-    audioQueueRef.current = [];
     stopCurrentAudio();
     setIsSpeaking(false);
   }, [stopCurrentAudio]);
@@ -425,7 +400,6 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
     setResponsePreview('');
     setLatency(null);
     setError(null);
-    audioQueueRef.current = [];
   }, []);
 
   // Troca de agente em tempo real

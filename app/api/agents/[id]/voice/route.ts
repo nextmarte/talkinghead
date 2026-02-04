@@ -4,9 +4,37 @@ import prisma from "@/lib/prisma";
 import { writeFile, mkdir, unlink } from "fs/promises";
 import { join } from "path";
 import { existsSync } from "fs";
+import OpenAI from "openai";
+import { createReadStream } from "fs";
 
 // Diretório de uploads
 const UPLOAD_DIR = process.env.UPLOAD_DIR || "/home/marcus/talkinghead/backend/data/uploads";
+
+// Cliente OpenAI para transcrição
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+/**
+ * Transcreve áudio usando a API do Whisper da OpenAI.
+ * Isso é usado para obter o texto de referência para melhor voice cloning.
+ */
+async function transcribeAudio(audioPath: string): Promise<string> {
+  try {
+    console.log(`🎙️ Transcrevendo áudio: ${audioPath}`);
+    
+    const response = await openai.audio.transcriptions.create({
+      model: "whisper-1",
+      file: createReadStream(audioPath),
+      language: "pt",
+    });
+    
+    const text = response.text?.trim() || "";
+    console.log(`✅ Transcrição: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
+    return text;
+  } catch (error) {
+    console.error("⚠️ Erro ao transcrever áudio:", error);
+    return "";
+  }
+}
 
 // POST /api/agents/[id]/voice - Upload de sample de voz para clonagem
 export async function POST(
@@ -87,6 +115,25 @@ export async function POST(
     const bytes = await file.arrayBuffer();
     await writeFile(filePath, Buffer.from(bytes));
 
+    // Transcreve o áudio para obter texto de referência (melhora voice cloning)
+    const refText = await transcribeAudio(filePath);
+    
+    // Salva transcrição em arquivo de texto
+    if (refText) {
+      const refTextPath = join(voicesDir, `${agentId}_ref.txt`);
+      await writeFile(refTextPath, refText);
+      console.log(`✅ Texto de referência salvo: ${refTextPath}`);
+    }
+
+    // Invalida cache do TTS no backend (para recarregar a nova voz)
+    try {
+      const backendUrl = process.env.BACKEND_URL || "http://localhost:8583";
+      await fetch(`${backendUrl}/tts/cache/invalidate/${agentId}`, { method: "POST" });
+      console.log(`🔄 Cache TTS invalidado para: ${agentId}`);
+    } catch (e) {
+      console.warn("Aviso: Não foi possível invalidar cache do TTS:", e);
+    }
+
     // URL pública do sample
     const voiceUrl = `/uploads/voices/${fileName}`;
 
@@ -98,7 +145,10 @@ export async function POST(
 
     return NextResponse.json({ 
       voiceSample: voiceUrl,
-      message: "Sample de voz enviado. Recomenda-se 10-30 segundos de fala clara para melhor clonagem."
+      transcription: refText || undefined,
+      message: refText 
+        ? "Sample de voz enviado e transcrito com sucesso! Voice cloning otimizado."
+        : "Sample de voz enviado. Transcrição falhou, usando modo x_vector_only."
     });
   } catch (error) {
     console.error("Erro ao fazer upload de voice:", error);
@@ -136,9 +186,23 @@ export async function DELETE(
         if (existsSync(filePath)) {
           await unlink(filePath);
         }
+        // Remove também arquivo preparado e transcrição
+        const voicesDir = join(UPLOAD_DIR, "voices");
+        const preparedPath = join(voicesDir, `${agentId}_prepared.wav`);
+        const refTextPath = join(voicesDir, `${agentId}_ref.txt`);
+        if (existsSync(preparedPath)) await unlink(preparedPath);
+        if (existsSync(refTextPath)) await unlink(refTextPath);
       } catch (e) {
         console.warn("Erro ao remover voice sample:", e);
       }
+    }
+
+    // Invalida cache do TTS no backend
+    try {
+      const backendUrl = process.env.BACKEND_URL || "http://localhost:8583";
+      await fetch(`${backendUrl}/tts/cache/invalidate/${agentId}`, { method: "POST" });
+    } catch (e) {
+      console.warn("Aviso: Não foi possível invalidar cache do TTS:", e);
     }
 
     // Atualiza no banco
