@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from services.tts_dual_gpu import DualGPUTTSService
+from services.tts_qwen3 import Qwen3TTSService
 from services.stt_service import STTService
 from services.llm_service import LLMService
 from services.agent_service import agent_service
@@ -45,9 +46,14 @@ async def lifespan(app: FastAPI):
     # Inicializa serviços
     loop = asyncio.get_event_loop()
     
-    # TTS Dual-GPU (carrega em ambas as GPUs)
-    tts_service = await loop.run_in_executor(None, DualGPUTTSService)
-    print(f"✅ TTS Dual-GPU carregado em {time.time() - start:.2f}s")
+    # TTS - seleciona baseado na configuração
+    tts_provider = os.getenv("TTS_PROVIDER", "coqui").lower()
+    if tts_provider == "qwen3":
+        tts_service = await loop.run_in_executor(None, Qwen3TTSService)
+        print(f"✅ TTS Qwen3 carregado em {time.time() - start:.2f}s")
+    else:
+        tts_service = await loop.run_in_executor(None, DualGPUTTSService)
+        print(f"✅ TTS Dual-GPU carregado em {time.time() - start:.2f}s")
     
     # STT (se Whisper local, usa GPU que sobrar; se API, não usa GPU)
     stt_service = await loop.run_in_executor(None, STTService)

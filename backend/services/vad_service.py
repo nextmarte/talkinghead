@@ -30,7 +30,7 @@ class VADService:
         sample_rate: int = 16000,
         chunk_size_ms: int = 100,
         speech_threshold: float = 0.5,
-        silence_duration_ms: int = 700,  # Tempo de silêncio para considerar fim de fala
+        silence_duration_ms: int = 450,  # Tempo de silêncio para considerar fim de fala (era 700ms)
         min_speech_duration_ms: int = 250,  # Duração mínima para considerar fala válida
     ):
         self.sample_rate = sample_rate

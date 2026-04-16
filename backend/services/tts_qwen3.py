@@ -1,11 +1,13 @@
 """
 Serviço de TTS usando Qwen3-TTS para síntese de voz com clonagem.
 Modelo: Qwen3-TTS-12Hz-0.6B-Base (voice cloning)
+Usa fork streaming: rekuenkdr/Qwen3-TTS-streaming
 
 Características:
 - Suporta português brasileiro
 - Voice cloning com ~3 segundos de áudio de referência
-- Latência baixa (~97ms com streaming)
+- Streaming real: ~300ms para primeiro chunk de áudio
+- torch.compile + CUDA graphs para RTF > 1.0x
 - Sample rate: 24kHz
 """
 import os
@@ -14,7 +16,7 @@ import asyncio
 import subprocess
 import numpy as np
 from pathlib import Path
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, Generator
 from concurrent.futures import ThreadPoolExecutor
 
 # Diretório de uploads
@@ -65,18 +67,18 @@ class Qwen3TTSService:
         self._init_model()
     
     def _init_model(self):
-        """Inicializa o modelo Qwen3-TTS."""
+        """Inicializa o modelo Qwen3-TTS com otimizações de streaming."""
         import torch
         from qwen_tts import Qwen3TTSModel
-        
+
         model_name = os.getenv("QWEN3_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
         device = os.getenv("TTS_DEVICE", "cuda:0")
-        
+
         print(f"🔊 Carregando Qwen3-TTS: {model_name}")
-        print(f"🖥️  Device: {device}")
+        print(f"��️  Device: {device}")
         print(f"⚙️  Hiperparâmetros: {self.generation_config}")
         print(f"📡 Streaming: {self.use_streaming}")
-        
+
         # Detecta suporte a FlashAttention 2
         attn_impl = "eager"
         try:
@@ -84,8 +86,8 @@ class Qwen3TTSService:
             attn_impl = "flash_attention_2"
             print("⚡ FlashAttention 2 disponível")
         except ImportError:
-            print("ℹ️  FlashAttention 2 não disponível, usando eager attention")
-        
+            print("ℹ️  FlashAttention 2 n��o disponível, usando eager attention")
+
         # Carrega modelo
         self.model = Qwen3TTSModel.from_pretrained(
             model_name,
@@ -93,48 +95,61 @@ class Qwen3TTSService:
             dtype=torch.bfloat16,
             attn_implementation=attn_impl,
         )
-        
+
+        # Habilita otimizações de streaming (torch.compile + CUDA graphs)
+        if self.use_streaming and hasattr(self.model, 'enable_streaming_optimizations'):
+            print("🚀 Habilitando otimizações de streaming...")
+            try:
+                self.model.enable_streaming_optimizations(
+                    decode_window_frames=80,
+                    use_compile=True,
+                    compile_mode="reduce-overhead",
+                )
+                print("✅ Otimizações de streaming habilitadas (torch.compile + CUDA graphs)")
+            except Exception as e:
+                print(f"⚠️ Erro ao habilitar otimizações de streaming: {e}")
+
         # Voz de referência padrão
         self.default_speaker_wav: Optional[str] = None
         self.default_ref_text: Optional[str] = None
         models_dir = Path(__file__).parent.parent / "models"
         reference_voice = models_dir / "reference_voice.wav"
-        
+
         if reference_voice.exists():
             self.default_speaker_wav = str(reference_voice)
-            # Texto de referência padrão (deve corresponder ao áudio)
             self.default_ref_text = os.getenv(
-                "TTS_REFERENCE_TEXT", 
+                "TTS_REFERENCE_TEXT",
                 "Olá, esta é uma demonstração de síntese de voz."
             )
             print(f"🎤 Voz de referência padrão: {self.default_speaker_wav}")
-        
-        # Warm-up (desabilitado - causa travamento com decodificação gulosa)
-        # print("🔥 Aquecendo modelo...")
-        # self._warmup()
-        
+
+        # Warm-up com streaming para compilar CUDA graphs
+        if self.use_streaming and self.default_speaker_wav:
+            print("🔥 Aquecendo modelo com streaming...")
+            self._warmup_streaming()
+
         print(f"✅ Qwen3-TTS pronto! Sample rate: {self.sample_rate}Hz")
     
-    def _warmup(self):
-        """Aquece o modelo com uma síntese de teste."""
-        import torch
-        
+    def _warmup_streaming(self):
+        """Aquece o modelo com streaming para compilar CUDA graphs."""
         try:
-            with torch.no_grad():
-                if self.default_speaker_wav:
-                    # Warm-up com voice cloning
-                    _, _ = self.model.generate_voice_clone(
-                        text="Teste de aquecimento.",
-                        language="Portuguese",
-                        ref_audio=self.default_speaker_wav,
-                        ref_text=self.default_ref_text or "Teste",
-                    )
-                else:
-                    # Warm-up sem clonagem (não deveria acontecer)
-                    print("⚠️ Sem voz de referência para warm-up")
-            print("✅ Warm-up concluído!")
+            prompt = self.model.create_voice_clone_prompt(
+                ref_audio=self.default_speaker_wav,
+                ref_text=self.default_ref_text or "Teste",
+                x_vector_only_mode=False,
+            )
+            # Roda uma geração streaming para compilar tudo
+            for chunk, sr in self.model.stream_generate_voice_clone(
+                text="Teste de aquecimento.",
+                language="Portuguese",
+                voice_clone_prompt=prompt,
+                emit_every_frames=12,
+                decode_window_frames=80,
+            ):
+                pass  # Descarta chunks de warmup
+            print("✅ Warm-up streaming concluído!")
         except Exception as e:
-            print(f"⚠️ Warm-up falhou: {e}")
+            print(f"⚠️ Warm-up streaming falhou: {e}")
     
     def _prepare_voice_file(self, input_file: Path, output_file: Path, max_duration: int = 10) -> bool:
         """
@@ -457,7 +472,7 @@ class Qwen3TTSService:
                 # Prepara kwargs de geração
                 gen_kwargs = {
                     **self.generation_config,
-                    "non_streaming_mode": False,  # Sempre streaming para TTS em tempo real
+                    "non_streaming_mode": True,  # non_streaming_mode=False causa hallucinations em frases curtas
                 }
                 
                 # Se não usar sampling, remove parâmetros de sampling
@@ -511,6 +526,70 @@ class Qwen3TTSService:
             traceback.print_exc()
             return np.array([], dtype=np.float32), self.sample_rate
     
+    def synthesize_streaming(
+        self,
+        text: str,
+        agent_id: Optional[str] = None,
+        voice_config: Optional[dict] = None,
+        agent_config: Any = None,
+    ) -> Generator[Tuple[np.ndarray, int], None, None]:
+        """
+        Sintetiza texto com streaming real — gera chunks de áudio incrementalmente.
+        First chunk em ~300ms, depois chunks a cada ~100ms.
+
+        Yields:
+            Tuple (audio_chunk, sample_rate) para cada chunk
+        """
+        # ElevenLabs fallback (não suporta streaming, sintetiza tudo)
+        if agent_config and hasattr(agent_config, 'use_elevenlabs') and agent_config.use_elevenlabs:
+            if agent_config.elevenlabs_voice_id:
+                try:
+                    from services.elevenlabs_service import get_elevenlabs_service
+                    elevenlabs = get_elevenlabs_service()
+                    clean_text = self._clean_text_for_tts(text)
+                    audio, sr = elevenlabs.synthesize(clean_text, agent_config.elevenlabs_voice_id, agent_id)
+                    yield audio, sr
+                    return
+                except Exception as e:
+                    print(f"⚠️ ElevenLabs falhou, fallback para Qwen3 streaming: {e}")
+
+        text = self._clean_text_for_tts(text)
+        if not text.strip():
+            return
+
+        lang = self._map_language(self.language)
+        prompt = self._get_or_create_prompt(agent_id)
+
+        if not prompt:
+            return
+
+        try:
+            for chunk, sr in self.model.stream_generate_voice_clone(
+                text=text,
+                language=lang,
+                voice_clone_prompt=prompt,
+                emit_every_frames=12,
+                decode_window_frames=80,
+                overlap_samples=512,
+                first_chunk_emit_every=5,
+                first_chunk_decode_window=48,
+                first_chunk_frames=48,
+            ):
+                audio = np.array(chunk, dtype=np.float32)
+
+                # Aplica ajustes de voz
+                if voice_config and len(audio) > 0:
+                    pitch = voice_config.get("pitch", 1.0)
+                    speed = voice_config.get("speed", 1.0)
+                    audio = self._adjust_audio(audio, pitch, speed)
+
+                yield audio, sr
+
+        except Exception as e:
+            print(f"❌ Erro no streaming Qwen3-TTS: {e}")
+            import traceback
+            traceback.print_exc()
+
     def get_sample_rate(self) -> int:
         """Retorna sample rate do áudio gerado."""
         return self.sample_rate

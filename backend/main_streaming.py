@@ -33,7 +33,7 @@ from routers.agents import router as agents_router
 
 load_dotenv()
 
-# Tipo de TTS service (Coqui ou Qwen3)
+# Tipo de TTS service
 TTSServiceType = DualGPUTTSService | Qwen3TTSService
 
 # Serviços globais
@@ -247,19 +247,20 @@ class ConversationSession:
                 "latency_ms": int(stt_time * 1000)
             })
             
-            # === FASE 2: LLM STREAMING → TTS COM TEXTO COMPLETO ===
+            # === FASE 2: LLM STREAMING → TTS POR SENTENÇA ===
             llm_start = time.time()
-            
+
             self.conversation_history.append({"role": "user", "content": transcript})
-            
-            # Acumula TODO o texto da resposta
+
             full_response = ""
+            tts_buffer = ""
+            chunk_index = 0
             first_audio_sent = False
             first_audio_time = 0
-            
+
             self.is_agent_speaking = True
             self.should_interrupt = False
-            
+
             # Busca configurações de voz do agente
             agent_config = await agent_service.get_agent(self.agent_id)
             voice_config = {
@@ -267,54 +268,110 @@ class ConversationSession:
                 "speed": agent_config.voice_speed,
                 "gender": agent_config.voice_gender,
             }
-            
-            # Processa stream do LLM - apenas acumula
+
+            # Verifica se TTS suporta streaming real (Qwen3-TTS-streaming)
+            has_tts_streaming = hasattr(tts_service, 'synthesize_streaming')
+
+            async def _send_tts_chunks(sentence: str):
+                """Sintetiza e envia chunks de áudio para uma sentença."""
+                nonlocal chunk_index, first_audio_sent, first_audio_time
+
+                if has_tts_streaming:
+                    # Streaming real: envia cada chunk do TTS conforme gerado (~300ms pro primeiro)
+                    def _stream_sentence():
+                        return list(tts_service.synthesize_streaming(
+                            sentence, agent_id=self.agent_id,
+                            voice_config=voice_config, agent_config=agent_config,
+                        ))
+
+                    tts_chunks = await loop.run_in_executor(None, _stream_sentence)
+
+                    for audio_chunk, audio_sr in tts_chunks:
+                        if self.should_interrupt or len(audio_chunk) == 0:
+                            break
+
+                        if not first_audio_sent:
+                            first_audio_time = time.time() - pipeline_start
+                            first_audio_sent = True
+
+                        audio_int16 = (audio_chunk * 32767).astype(np.int16)
+                        audio_base64 = base64.b64encode(audio_int16.tobytes()).decode()
+
+                        await self.send({
+                            "type": "audio_chunk",
+                            "data": audio_base64,
+                            "sample_rate": audio_sr,
+                            "chunk_index": chunk_index,
+                            "sentence": sentence,
+                            "latency_ms": int((time.time() - pipeline_start) * 1000)
+                        })
+                        chunk_index += 1
+                else:
+                    # Fallback: sintetiza sentença inteira
+                    audio_array, audio_sr = await loop.run_in_executor(
+                        None, tts_service.synthesize, sentence, 0,
+                        self.agent_id, voice_config, agent_config
+                    )
+
+                    if len(audio_array) > 0 and not self.should_interrupt:
+                        if not first_audio_sent:
+                            first_audio_time = time.time() - pipeline_start
+                            first_audio_sent = True
+
+                        audio_int16 = (audio_array * 32767).astype(np.int16)
+                        audio_base64 = base64.b64encode(audio_int16.tobytes()).decode()
+
+                        await self.send({
+                            "type": "audio_chunk",
+                            "data": audio_base64,
+                            "sample_rate": audio_sr,
+                            "chunk_index": chunk_index,
+                            "sentence": sentence,
+                            "latency_ms": int((time.time() - pipeline_start) * 1000)
+                        })
+                        chunk_index += 1
+
+            # Processa stream do LLM — sintetiza cada sentença assim que completa
             async for token in llm_service.generate_response_streaming(
                 self.conversation_history,
                 agent_id=self.agent_id
             ):
                 if self.should_interrupt:
                     break
-                
+
                 full_response += token
-                
+                tts_buffer += token
+
                 # Envia preview do texto em tempo real
                 await self.send({
                     "type": "response_chunk",
                     "text": token,
                     "full_text": full_response
                 })
-            
-            # === FASE 3: TTS COM TEXTO COMPLETO ===
-            if full_response.strip() and not self.should_interrupt:
-                print(f"🎵 Sintetizando texto completo ({len(full_response)} chars)...")
-                
+
+                # Detecta sentenças completas no buffer
+                sentences = self.split_into_sentences(tts_buffer)
+                if len(sentences) > 1:
+                    for sentence in sentences[:-1]:
+                        if self.should_interrupt:
+                            break
+                        if not sentence.strip():
+                            continue
+                        try:
+                            await _send_tts_chunks(sentence)
+                            print(f"🎵 Sentença sintetizada: \"{sentence[:40]}...\"")
+                        except Exception as e:
+                            print(f"❌ Erro ao sintetizar: {e}")
+
+                    tts_buffer = sentences[-1]
+
+            # Sintetiza texto restante no buffer
+            if tts_buffer.strip() and not self.should_interrupt:
                 try:
-                    # Sintetiza TODO o texto de uma vez
-                    audio_array, audio_sr = await loop.run_in_executor(
-                        None, tts_service.synthesize, full_response, 0, self.agent_id, voice_config, agent_config
-                    )
-                    
-                    if len(audio_array) > 0 and not self.should_interrupt:
-                        first_audio_time = time.time() - pipeline_start
-                        first_audio_sent = True
-                        
-                        # Converte e envia áudio completo como um único chunk
-                        audio_int16 = (audio_array * 32767).astype(np.int16)
-                        audio_base64 = base64.b64encode(audio_int16.tobytes()).decode()
-                        
-                        await self.send({
-                            "type": "audio_chunk",
-                            "data": audio_base64,
-                            "sample_rate": audio_sr,
-                            "chunk_index": 0,
-                            "sentence": full_response,
-                            "latency_ms": int((time.time() - pipeline_start) * 1000)
-                        })
-                        
-                        print(f"✅ Áudio sintetizado: {len(audio_array) / audio_sr:.1f}s")
+                    await _send_tts_chunks(tts_buffer)
+                    print(f"🎵 Sentença final: \"{tts_buffer[:40]}...\"")
                 except Exception as e:
-                    print(f"❌ Erro ao sintetizar: {e}")
+                    print(f"❌ Erro ao sintetizar final: {e}")
             
             llm_time = time.time() - llm_start
             total_time = time.time() - pipeline_start

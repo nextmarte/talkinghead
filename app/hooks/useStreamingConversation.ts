@@ -65,6 +65,8 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const audioQueueRef = useRef<{data: Float32Array, sampleRate: number}[]>([]);
+  const isPlayingQueueRef = useRef(false);
 
   // Conecta ao WebSocket (modo streaming)
   const connect = useCallback(() => {
@@ -148,11 +150,8 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
           break;
 
         case 'audio_chunk':
-          // Recebe e toca áudio completo imediatamente
+          // Recebe chunk de áudio e enfileira para reprodução sequencial
           if (message.data) {
-            console.log(`🎵 audio_chunk recebido (sr=${message.sample_rate})`);
-            
-            // Decodifica o áudio em float32
             const binaryString = atob(message.data);
             const bytes = new Uint8Array(binaryString.length);
             for (let i = 0; i < binaryString.length; i++) {
@@ -163,10 +162,11 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
             for (let i = 0; i < int16Array.length; i++) {
               float32Array[i] = int16Array[i] / 32768.0;
             }
-            
-            // Toca áudio completo contínuo
-            playAudioContinuous(float32Array, message.sample_rate!);
+
+            // Enfileira e processa sequencialmente
+            audioQueueRef.current.push({ data: float32Array, sampleRate: message.sample_rate! });
             setIsSpeaking(true);
+            processAudioQueue();
           }
           break;
 
@@ -215,8 +215,10 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
   }, [agentId]);
 
   // Desconecta
-  // Para áudio atual
+  // Para áudio atual e limpa fila
   const stopCurrentAudio = useCallback(() => {
+    audioQueueRef.current = [];
+    isPlayingQueueRef.current = false;
     if (currentSourceRef.current) {
       try {
         currentSourceRef.current.stop();
@@ -264,47 +266,49 @@ export function useStreamingConversation(options: UseStreamingOptions = {}) {
     setIsConnected(false);
   }, [stopListening, stopCurrentAudio]);
 
-  // Toca áudio
-  // Toca áudio contínuo completo
-  const playAudioContinuous = async (float32Array: Float32Array, sampleRate: number): Promise<void> => {
+  // Processa fila de áudio sequencialmente (chunk por chunk)
+  const processAudioQueue = async () => {
+    if (isPlayingQueueRef.current) return; // Já está tocando
+    isPlayingQueueRef.current = true;
+
     try {
-      console.log(`🔊 Tocando áudio (sr=${sampleRate}, size=${float32Array.length} samples)`);
-      
-      if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
-        console.log(`🔊 Criando novo AudioContext (sr=${sampleRate})`);
-        audioContextRef.current = new AudioContext({ sampleRate });
+      while (audioQueueRef.current.length > 0) {
+        const item = audioQueueRef.current.shift()!;
+
+        if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+          audioContextRef.current = new AudioContext({ sampleRate: item.sampleRate });
+        }
+        const ctx = audioContextRef.current;
+
+        if (ctx.state === 'suspended') {
+          await ctx.resume();
+        }
+
+        const audioBuffer = ctx.createBuffer(1, item.data.length, item.sampleRate);
+        audioBuffer.getChannelData(0).set(item.data);
+
+        const source = ctx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(ctx.destination);
+        currentSourceRef.current = source;
+
+        await new Promise<void>((resolve) => {
+          source.onended = () => {
+            if (currentSourceRef.current === source) {
+              currentSourceRef.current = null;
+            }
+            resolve();
+          };
+          source.start();
+        });
       }
-      const ctx = audioContextRef.current;
-
-      if (ctx.state === 'suspended') {
-        console.log(`🔊 AudioContext estava suspenso, resumindo...`);
-        await ctx.resume();
-      }
-
-      console.log(`🔊 Criando buffer de ${float32Array.length} samples`);
-      const audioBuffer = ctx.createBuffer(1, float32Array.length, sampleRate);
-      audioBuffer.getChannelData(0).set(float32Array);
-
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(ctx.destination);
-      currentSourceRef.current = source;
-      
-      return new Promise<void>((resolve) => {
-        source.onended = () => {
-          console.log(`🔊 Áudio terminou`);
-          setIsSpeaking(false);
-          if (currentSourceRef.current === source) {
-            currentSourceRef.current = null;
-          }
-          resolve();
-        };
-        console.log(`🔊 Iniciando reprodução...`);
-        source.start();
-      });
     } catch (err) {
-      console.error('❌ Erro ao tocar áudio:', err);
-      setIsSpeaking(false);
+      console.error('Erro ao tocar áudio:', err);
+    } finally {
+      isPlayingQueueRef.current = false;
+      if (audioQueueRef.current.length === 0) {
+        setIsSpeaking(false);
+      }
     }
   };
 
