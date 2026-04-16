@@ -465,7 +465,16 @@ async def websocket_stream(websocket: WebSocket, agent_id: Optional[str] = None)
     
     try:
         while True:
-            message = await websocket.receive_json()
+            try:
+                message = await asyncio.wait_for(websocket.receive_json(), timeout=300)
+            except asyncio.TimeoutError:
+                print(f"⏱️ Timeout na conexão ({agent_name}), encerrando...")
+                break
+            except RuntimeError as e:
+                if "not connected" in str(e).lower():
+                    print(f"⚠️ WebSocket desconectado ({agent_name}): {e}")
+                    break
+                raise
             
             if message["type"] == "audio_chunk":
                 # Processa chunk de áudio com VAD

@@ -95,18 +95,6 @@ export async function POST(
       await mkdir(voicesDir, { recursive: true });
     }
 
-    // Remove sample antigo se existir
-    if (agent.voiceSample) {
-      try {
-        const oldPath = join(UPLOAD_DIR, agent.voiceSample.replace("/uploads/", ""));
-        if (existsSync(oldPath)) {
-          await unlink(oldPath);
-        }
-      } catch (e) {
-        console.warn("Erro ao remover sample antigo:", e);
-      }
-    }
-
     // Salva novo sample (preferência por WAV para melhor qualidade de clonagem)
     const fileExt = ext || ".wav";
     const fileName = `${agentId}${fileExt}`;
@@ -114,6 +102,37 @@ export async function POST(
 
     const bytes = await file.arrayBuffer();
     await writeFile(filePath, Buffer.from(bytes));
+    console.log(`✅ Arquivo de áudio salvo: ${filePath}`);
+
+    // Remove arquivo antigo SOMENTE APÓS salvar o novo (só se for extensão diferente)
+    if (agent.voiceSample) {
+      try {
+        const oldPath = join(UPLOAD_DIR, agent.voiceSample.replace("/uploads/", ""));
+        // Só delete se for arquivo diferente (extensão diferente)
+        if (existsSync(oldPath) && oldPath !== filePath) {
+          await unlink(oldPath);
+          console.log(`🗑️ Arquivo antigo removido: ${oldPath}`);
+        }
+      } catch (e) {
+        console.warn("Erro ao remover arquivo antigo:", e);
+      }
+    }
+
+    // Remove arquivo preparado e transcrição antiga (sempre remove para recalcular)
+    try {
+      const preparedPath = join(voicesDir, `${agentId}_prepared.wav`);
+      const refTextPath = join(voicesDir, `${agentId}_ref.txt`);
+      if (existsSync(preparedPath)) {
+        await unlink(preparedPath);
+        console.log(`🗑️ Arquivo preparado anterior removido: ${preparedPath}`);
+      }
+      if (existsSync(refTextPath)) {
+        await unlink(refTextPath);
+        console.log(`🗑️ Transcrição anterior removida: ${refTextPath}`);
+      }
+    } catch (e) {
+      console.warn("Erro ao remover arquivos temporários:", e);
+    }
 
     // Transcreve o áudio para obter texto de referência (melhora voice cloning)
     const refText = await transcribeAudio(filePath);

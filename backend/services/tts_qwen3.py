@@ -168,7 +168,7 @@ class Qwen3TTSService:
             y, sr = librosa.load(str(temp_wav), sr=24000, mono=True)
             
             # Remove apenas silêncio no início (não no fim para manter naturalidade)
-            y, _ = librosa.effects.trim(y, top_db=35, ref=np.max, pad=False)
+            y, _ = librosa.effects.trim(y, top_db=35, ref=np.max)
             
             # Normaliza para evitar clipping, mantendo headroom
             if np.max(np.abs(y)) > 0:
@@ -227,10 +227,16 @@ class Qwen3TTSService:
                         voice_path = str(prepared_file)
                     break
         
-        # Texto de referência (opcional - melhora qualidade)
+        # Texto de referência (sempre lê do arquivo para garantir versão mais recente)
         ref_text = None
         if ref_text_file.exists():
-            ref_text = ref_text_file.read_text().strip()
+            try:
+                ref_text = ref_text_file.read_text(encoding='utf-8').strip()
+                if ref_text:
+                    print(f"✅ Texto de referência carregado ({len(ref_text)} chars): {ref_text[:60]}...")
+            except Exception as e:
+                print(f"⚠️ Erro ao ler arquivo de referência: {e}")
+                ref_text = None
         
         if voice_path:
             return voice_path, ref_text
@@ -242,6 +248,7 @@ class Qwen3TTSService:
     def _get_or_create_prompt(self, agent_id: Optional[str]) -> Optional[Any]:
         """
         Obtém ou cria prompt de clonagem cacheado para o agente.
+        NOTA: Se o cache foi invalidado, sempre reconstrói o prompt.
         
         Args:
             agent_id: ID do agente (None = voz padrão)
@@ -253,12 +260,16 @@ class Qwen3TTSService:
         
         # Verifica cache
         if cache_key in self.voice_prompts_cache:
+            print(f"📦 Usando prompt em cache para: {cache_key}")
             return self.voice_prompts_cache[cache_key]
+        
+        print(f"🔄 Reconstruindo prompt para: {cache_key} (não está em cache)")
         
         # Obtém voz do agente
         voice_path, ref_text = self._get_agent_voice(agent_id)
         
         if not voice_path:
+            print(f"❌ Nenhuma voz encontrada para: {cache_key}")
             return None
         
         try:
@@ -267,7 +278,9 @@ class Qwen3TTSService:
             use_x_vector_only = not ref_text or ref_text.strip() == ""
             
             if use_x_vector_only:
-                print(f"ℹ️ Usando x_vector_only para {cache_key} (sem texto de referência)")
+                print(f"ℹ️ Modo x_vector_only para {cache_key} (SEM texto de referência)")
+            else:
+                print(f"✨ Modo full voice cloning para {cache_key} (COM texto: {ref_text[:50]}...)")
             
             # Cria prompt reutilizável
             prompt_items = self.model.create_voice_clone_prompt(
@@ -278,7 +291,7 @@ class Qwen3TTSService:
             
             # Armazena no cache
             self.voice_prompts_cache[cache_key] = prompt_items
-            print(f"✅ Prompt de voz cacheado para: {cache_key}")
+            print(f"✅ Novo prompt criado e cacheado para: {cache_key}")
             
             return prompt_items
         except Exception as e:
@@ -287,7 +300,7 @@ class Qwen3TTSService:
     
     def invalidate_cache(self, agent_id: Optional[str] = None):
         """
-        Invalida cache de prompt de voz.
+        Invalida cache de prompt de voz e força recarregamento.
         
         Args:
             agent_id: ID do agente ou None para limpar tudo
@@ -297,9 +310,11 @@ class Qwen3TTSService:
             if cache_key in self.voice_prompts_cache:
                 del self.voice_prompts_cache[cache_key]
                 print(f"🗑️ Cache invalidado para: {cache_key}")
+            else:
+                print(f"ℹ️ Cache já vazio para: {cache_key}")
         else:
             self.voice_prompts_cache.clear()
-            print("🗑️ Cache de vozes limpo")
+            print("🗑️ Cache de vozes limpo completamente")
     
     def _clean_text_for_tts(self, text: str) -> str:
         """
